@@ -1,0 +1,45 @@
+# =============================================================
+# templates/pdb.yaml — PodDisruptionBudget
+#
+# PDB гарантирует что при плановом обслуживании кластера
+# (drain ноды, обновление K8s) всегда будет доступно
+# минимальное число подов приложения.
+#
+# Сценарий: kubectl drain worker-01 (вывести ноду из кластера)
+#   БЕЗ PDB: K8s удалит ВСЕ поды с этой ноды одновременно
+#             → даунтайм приложения
+#   С PDB:   K8s удалит поды только если остаётся >= minAvailable
+#             → zero-downtime maintenance
+#
+# minAvailable: 1 означает "всегда должен быть хотя бы 1 под"
+# =============================================================
+
+{{- if .Values.pdb.enabled }}
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend-pdb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "devtracker.backendSelectorLabels" . | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "devtracker.fullname" . }}-frontend-pdb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.frontendLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "devtracker.frontendSelectorLabels" . | nindent 6 }}
+
+{{- end }}

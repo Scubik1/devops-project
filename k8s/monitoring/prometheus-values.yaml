@@ -1,0 +1,141 @@
+# =============================================================
+# k8s/monitoring/prometheus-values.yaml
+# Конфигурация kube-prometheus-stack Helm Chart
+#
+# kube-prometheus-stack включает ВСЁ сразу:
+#   - Prometheus (сбор и хранение метрик)
+#   - Grafana (визуализация)
+#   - AlertManager (маршрутизация алертов)
+#   - Node Exporter (метрики нод: CPU, RAM, диск, сеть)
+#   - kube-state-metrics (метрики K8s объектов)
+#   - Prometheus Operator (управление через CRD)
+#
+# ПРИНЦИП: Prometheus Operator позволяет настраивать Prometheus
+# через Kubernetes объекты (ServiceMonitor, PrometheusRule)
+# вместо редактирования конфига вручную.
+# =============================================================
+
+# ── Grafana ────────────────────────────────────────────────────
+grafana:
+  enabled: true
+
+  adminPassword: "prom-operator"   # Сменить в production!
+
+  # Выставить Grafana по NodePort для локального доступа
+  service:
+    type: NodePort
+    nodePort: 30030
+
+  # Постоянное хранилище для дашбордов и настроек
+  persistence:
+    enabled: true
+    storageClassName: "local-path"
+    size: 2Gi
+
+  # Провайдеры дашбордов — автоматически загружать из ConfigMap
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'default'
+          orgId: 1
+          folder: 'DevTracker'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+  # Настройки по умолчанию
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s:%(http_port)s/"
+    analytics:
+      reporting_enabled: false   # Не отправлять телеметрию Grafana Inc.
+    log:
+      mode: console
+      level: info
+
+# ── Prometheus ─────────────────────────────────────────────────
+prometheus:
+  enabled: true
+
+  service:
+    type: NodePort
+    nodePort: 30090
+
+  prometheusSpec:
+    # Как долго хранить метрики (для локальной среды достаточно 7 дней)
+    retention: 7d
+
+    # Постоянное хранилище для метрик
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: "local-path"
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # ВАЖНАЯ НАСТРОЙКА: Prometheus будет искать ServiceMonitor
+    # с лейблом "release: kube-prometheus-stack" ВО ВСЕХ namespace.
+    # Это необходимо чтобы наш ServiceMonitor из helm/templates
+    # был обнаружен Prometheus'ом.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}         # Искать во всех namespace
+    serviceMonitorNamespaceSelector: {} # Без ограничений по namespace
+
+    # То же для PrometheusRule
+    ruleSelectorNilUsesHelmValues: false
+    ruleSelector: {}
+    ruleNamespaceSelector: {}
+
+    # Ресурсы Prometheus
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "2Gi"
+
+# ── AlertManager ───────────────────────────────────────────────
+alertmanager:
+  enabled: true
+
+  service:
+    type: NodePort
+    nodePort: 30093
+
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: "local-path"
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 1Gi
+
+# ── Node Exporter ──────────────────────────────────────────────
+# Экспортирует метрики хостовой ОС: CPU, RAM, диск, сеть
+nodeExporter:
+  enabled: true
+
+# ── kube-state-metrics ─────────────────────────────────────────
+# Экспортирует состояние K8s объектов:
+# сколько подов Running/Pending/Failed, состояние Deployment и т.д.
+kubeStateMetrics:
+  enabled: true
+
+# ── Prometheus Operator ────────────────────────────────────────
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"

@@ -1,0 +1,100 @@
+# =============================================================
+# argocd/apps/staging.yaml — ArgoCD Application для staging
+#
+# ArgoCD Application — это Custom Resource, который говорит
+# ArgoCD: "возьми код из этого Git-репозитория и задеплой
+# его в этот кластер/namespace".
+#
+# РЕЖИМ: AUTO-SYNC (автоматическая синхронизация)
+#   При каждом merge в main GitLab CI обновляет образ в кластере.
+#   Параллельно ArgoCD видит изменения в helm/ директории и
+#   тоже запускает helm upgrade. Это гарантирует что кластер
+#   ВСЕГДА соответствует тому что в Git.
+#
+# ОПЦИИ AUTO-SYNC:
+#   prune: true      — удалять ресурсы удалённые из Git
+#   selfHeal: true   — восстанавливать ресурсы изменённые вручную
+#
+# КАК ПРИМЕНИТЬ:
+#   kubectl apply -f argocd/apps/staging.yaml
+#   argocd app sync devtracker-staging   ← принудительная синхронизация
+# =============================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devtracker-staging
+  namespace: argocd          # ArgoCD Application ВСЕГДА создаётся в namespace argocd
+  labels:
+    app.kubernetes.io/name: devtracker
+    environment: staging
+  # Finalizer: при удалении Application ArgoCD сначала удалит
+  # все задеплоенные ресурсы, затем сам объект
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Уведомлять в Slack при изменении статуса (опционально)
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: devops-alerts
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: devops-alerts
+spec:
+  # Проект ArgoCD (default — стандартный, без ограничений)
+  # Для тонкой настройки прав можно создать отдельный AppProject
+  project: default
+
+  # ── Источник: Git репозиторий ──────────────────────────────
+  source:
+    repoURL: https://gitlab.com/yourorg/devtracker.git
+    targetRevision: main     # Ветка для синхронизации
+
+    # Путь к Helm Chart внутри репозитория
+    path: helm
+
+    # Параметры Helm
+    helm:
+      # Файл values для staging
+      valueFiles:
+        - values.yaml
+        - values-staging.yaml
+
+      # Дополнительные параметры передаваемые при деплое
+      # ВАЖНО: секреты НЕ хранятся в Git, передаются через
+      # ArgoCD Secrets или External Secrets Operator
+      parameters:
+        - name: backend.image.tag
+          # $ARGOCD_APP_REVISION — текущий git commit SHA
+          value: $ARGOCD_APP_REVISION
+
+  # ── Назначение: кластер и namespace ───────────────────────
+  destination:
+    # https://kubernetes.default.svc — внутренний адрес API сервера
+    # (ArgoCD запущен в том же кластере)
+    server: https://kubernetes.default.svc
+    namespace: staging
+
+  # ── Политика синхронизации ─────────────────────────────────
+  syncPolicy:
+    automated:
+      prune: true       # Удалять ресурсы, удалённые из Git
+      selfHeal: true    # Восстанавливать ресурсы изменённые вручную
+      allowEmpty: false # Не синхронизировать если результат — пустой набор ресурсов
+
+    syncOptions:
+      - CreateNamespace=true          # Создать namespace если не существует
+      - PrunePropagationPolicy=foreground  # Дождаться удаления дочерних ресурсов
+      - ServerSideApply=true          # Использовать Server-Side Apply (лучше для больших ресурсов)
+
+    retry:
+      limit: 3            # Количество повторных попыток при ошибке
+      backoff:
+        duration: 10s     # Начальная задержка
+        maxDuration: 60s  # Максимальная задержка
+        factor: 2         # Множитель (10s → 20s → 40s → 60s)
+
+  # ── Опции здоровья ─────────────────────────────────────────
+  # Игнорировать различия в полях, которые Kubernetes
+  # устанавливает автоматически
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas   # HPA управляет репликами — игнорировать разницу

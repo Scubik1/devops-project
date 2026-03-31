@@ -1,0 +1,101 @@
+# =============================================================
+# templates/hpa.yaml — Horizontal Pod Autoscaler
+#
+# HPA автоматически масштабирует количество подов на основе
+# метрик CPU/RAM. Алгоритм:
+#
+#   currentReplicas = floor(currentMetricValue / targetValue * currentReplicas)
+#
+# Пример: 3 пода, CPU 90%, target 70%
+#   → нужно 3 * (90/70) = 3.86 → округляем до 4 подов
+#
+# ТРЕБОВАНИЕ: Metrics Server должен быть установлен в кластере:
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#
+# Этот ресурс использует autoscaling/v2 API (K8s 1.23+)
+# который поддерживает множественные метрики.
+# =============================================================
+
+{{- if .Values.hpa.enabled }}
+
+# ── HPA для Backend ────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend-hpa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "devtracker.fullname" . }}-backend
+
+  minReplicas: {{ .Values.hpa.backend.minReplicas }}
+  maxReplicas: {{ .Values.hpa.backend.maxReplicas }}
+
+  metrics:
+    # Масштабировать если CPU > targetCPUUtilizationPercentage%
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.backend.targetCPUUtilizationPercentage }}
+    # Масштабировать если RAM > targetMemoryUtilizationPercentage%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.backend.targetMemoryUtilizationPercentage }}
+
+  behavior:
+    # Плавное масштабирование ВВЕРХ (scale up)
+    scaleUp:
+      stabilizationWindowSeconds: 60   # Подождать 60с перед добавлением подов
+      policies:
+        - type: Pods
+          value: 2          # Добавлять не более 2 подов за раз
+          periodSeconds: 60
+    # Медленное масштабирование ВНИЗ (scale down)
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Подождать 5 минут перед удалением
+      policies:
+        - type: Pods
+          value: 1          # Удалять не более 1 пода за раз
+          periodSeconds: 120
+---
+# ── HPA для Frontend ───────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "devtracker.fullname" . }}-frontend-hpa
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.frontendLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "devtracker.fullname" . }}-frontend
+
+  minReplicas: {{ .Values.hpa.frontend.minReplicas }}
+  maxReplicas: {{ .Values.hpa.frontend.maxReplicas }}
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.frontend.targetCPUUtilizationPercentage }}
+
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+{{- end }}

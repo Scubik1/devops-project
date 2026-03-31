@@ -1,0 +1,85 @@
+# =============================================================
+# values-staging.yaml — переопределения для STAGING окружения
+#
+# Применяется командой:
+#   helm upgrade --install devtracker ./helm \
+#     -f helm/values-staging.yaml \
+#     --set backend.secrets.dbPassword=$DB_PASS \
+#     --set backend.secrets.jwtSecret=$JWT_SECRET \
+#     --set postgres.password=$DB_PASS \
+#     -n staging
+#
+# ПРИНЦИП: staging экономит ресурсы, но функционально
+# идентичен production. Это позволяет тестировать деплой
+# на реальных ресурсах кластера.
+# =============================================================
+
+# ── Backend ───────────────────────────────────────────────────
+backend:
+  # 1 реплика в staging (экономим ресурсы)
+  replicaCount: 1
+
+  env:
+    LOG_LEVEL: "debug"    # Подробные логи в staging
+    NODE_ENV: "production"
+
+  resources:
+    requests:
+      cpu: "50m"       # В 2 раза меньше чем в prod
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+# ── Frontend ──────────────────────────────────────────────────
+frontend:
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: "25m"
+      memory: "32Mi"
+    limits:
+      cpu: "100m"
+      memory: "64Mi"
+
+# ── PostgreSQL ────────────────────────────────────────────────
+postgres:
+  storage:
+    size: "2Gi"    # Меньший диск в staging
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+# ── Ingress ───────────────────────────────────────────────────
+ingress:
+  hosts:
+    - host: devtracker-staging.local   # Отдельный hostname для staging
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+        - path: /api
+          pathType: Prefix
+          service: backend
+        - path: /health
+          pathType: Prefix
+          service: backend
+        - path: /metrics
+          pathType: Prefix
+          service: backend
+
+# ── HPA ───────────────────────────────────────────────────────
+hpa:
+  backend:
+    minReplicas: 1   # Не держать лишние поды в staging
+    maxReplicas: 3
+
+  frontend:
+    minReplicas: 1
+    maxReplicas: 2

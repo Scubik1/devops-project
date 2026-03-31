@@ -1,0 +1,43 @@
+# =============================================================
+# Chart.yaml — метаданные Helm Chart
+#
+# Каждый Helm Chart ОБЯЗАН содержать этот файл.
+# Версии:
+#   version    — версия самого chart (инфраструктурный код)
+#   appVersion — версия приложения DevTracker (обновляется CI/CD)
+#
+# Связь с CI/CD:
+#   При каждом релизе GitLab CI обновляет appVersion:
+#   helm upgrade --install devtracker ./helm \
+#     --set image.tag=$CI_COMMIT_SHORT_SHA \
+#     -f helm/values-staging.yaml
+# =============================================================
+
+apiVersion: v2
+name: devtracker
+description: >
+  DevTracker — веб-приложение для управления проектами и задачами.
+  Helm Chart для развёртывания в Kubernetes.
+  Включает: backend (Node.js), frontend (React/Nginx), PostgreSQL (StatefulSet).
+
+# Тип chart: application (не library)
+type: application
+
+# Версия chart — увеличивать при изменении инфраструктурного кода
+version: 1.0.0
+
+# Версия приложения — перезаписывается CI/CD через --set image.tag
+appVersion: "1.0.0"
+
+# Зависимости chart (сторонние компоненты)
+# В нашем случае их нет — PostgreSQL описан собственным StatefulSet,
+# а не зависимостью, чтобы иметь полный контроль над конфигурацией.
+
+keywords:
+  - devtracker
+  - project-management
+  - devops
+
+maintainers:
+  - name: DevOps Team
+    email: devops@example.com

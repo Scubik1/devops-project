@@ -1,0 +1,12 @@
+node_modules/
+build/
+.env
+.env.*
+npm-debug.log*
+.git/
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+src/**/*.test.js
+src/**/*.spec.js

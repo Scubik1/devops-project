@@ -1,0 +1,76 @@
+# =============================================================
+# templates/services.yaml — K8s Services для всех компонентов
+#
+# Service — это постоянный DNS-адрес для набора подов.
+# Проблема без Service: у подов динамические IP, которые меняются
+# при перезапуске. Service даёт стабильное имя.
+#
+# В кластере:
+#   devtracker-backend  → backend поды (порт 4000)
+#   devtracker-frontend → frontend поды (порт 3000)
+#   devtracker-postgres → postgres под (порт 5432)
+#
+# Все Services типа ClusterIP — доступны только внутри кластера.
+# Внешний доступ — через Ingress (отдельный ресурс).
+# =============================================================
+
+# ── Service для Backend API ────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+  annotations:
+    # Prometheus может использовать эту аннотацию для autodiscovery
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ .Values.backend.port | quote }}
+spec:
+  type: ClusterIP
+  # Selector: Service направляет трафик к подам с этими лейблами
+  selector:
+    {{- include "devtracker.backendSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.backend.port }}
+      targetPort: http   # Ссылается на name: http в containerPort
+      protocol: TCP
+---
+# ── Service для Frontend ───────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devtracker.fullname" . }}-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.frontendLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "devtracker.frontendSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.frontend.port }}
+      targetPort: http
+      protocol: TCP
+---
+# ── Service для PostgreSQL ─────────────────────────────────────
+# Тип ClusterIP для StatefulSet — Backend подключается по имени
+# "devtracker-postgres:5432" (значение DB_HOST в ConfigMap)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "devtracker.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.postgresLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "devtracker.postgresSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.postgres.port }}
+      targetPort: {{ .Values.postgres.port }}
+      protocol: TCP

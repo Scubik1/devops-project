@@ -1,0 +1,420 @@
+# =============================================================
+# .gitlab-ci.yml — CI/CD пайплайн DevTracker
+#
+# СТАДИИ (выполняются последовательно):
+#   test          → юнит-тесты backend и frontend
+#   build         → сборка Docker образов (multi-stage)
+#   scan          → Trivy: сканирование на уязвимости
+#   deploy-staging → авто-деплой в staging при merge в main
+#   deploy-prod   → деплой в prod (ТОЛЬКО вручную)
+#
+# ПЕРЕМЕННЫЕ (настроить в GitLab: Settings → CI/CD → Variables):
+#   KUBE_CONFIG          base64 kubeconfig для staging
+#   KUBE_CONFIG_PROD     base64 kubeconfig для prod
+#   TELEGRAM_BOT_TOKEN   токен Telegram бота
+#   TELEGRAM_CHAT_ID     ID чата для уведомлений
+#   DB_PASSWORD          пароль PostgreSQL (Protected + Masked)
+#   JWT_SECRET           секрет JWT (Protected + Masked)
+#
+# КАК РАБОТАЕТ ДЕПЛОЙ:
+#   CI обновляет тег образа в ArgoCD через helm upgrade,
+#   ArgoCD синхронизирует кластер. В staging — автоматически,
+#   в prod — только после ручного подтверждения в GitLab UI.
+# =============================================================
+
+# Глобальный образ для большинства задач
+image: docker:24-dind
+
+services:
+  - docker:24-dind
+
+variables:
+  DOCKER_TLS_CERTDIR: "/certs"
+  # Имена образов с тегом хеша коммита для точной идентификации версии
+  BACKEND_IMAGE:  "$CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHORT_SHA"
+  FRONTEND_IMAGE: "$CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHORT_SHA"
+  # Тег latest для удобного pull без знания хеша
+  BACKEND_LATEST:  "$CI_REGISTRY_IMAGE/backend:latest"
+  FRONTEND_LATEST: "$CI_REGISTRY_IMAGE/frontend:latest"
+
+stages:
+  - test
+  - build
+  - scan
+  - deploy-staging
+  - deploy-prod
+
+# =============================================================
+# ШАБЛОНЫ (YAML anchors) — переиспользуемые блоки
+# =============================================================
+
+# Шаблон для деплоя через Helm
+.helm-deploy: &helm-deploy
+  image: alpine/helm:3.14.0
+  before_script:
+    # Декодировать kubeconfig из base64 и сохранить в файл
+    - mkdir -p ~/.kube
+    - echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+    - chmod 600 ~/.kube/config
+    # Проверить подключение к кластеру
+    - kubectl cluster-info
+
+# =============================================================
+# СТАДИЯ: test
+# =============================================================
+
+# ── Backend: юнит-тесты + coverage ───────────────────────────
+test:backend:
+  stage: test
+  image: node:20-alpine
+
+  # Кэшировать node_modules между запусками (экономит ~30 сек)
+  # Кэш привязан к ветке — разные ветки не мешают друг другу
+  cache:
+    key: "backend-$CI_COMMIT_REF_SLUG"
+    paths:
+      - backend/node_modules/
+
+  before_script:
+    - cd backend
+    - npm ci   # Устанавливает зависимости строго по package-lock.json
+
+  script:
+    - npm test -- --coverage --passWithNoTests
+
+  # Сохранить отчёт покрытия как артефакт (доступен в GitLab UI)
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: backend/coverage/cobertura-coverage.xml
+    paths:
+      - backend/coverage/
+    expire_in: 7d
+    when: always   # Сохранять даже если тесты упали
+
+  # Регулярное выражение для парсинга % покрытия из вывода Jest
+  coverage: '/Lines\s*:\s*(\d+\.?\d*)%/'
+
+  # Запускать при любом push в любую ветку
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# ── Frontend: тесты ────────────────────────────────────────────
+test:frontend:
+  stage: test
+  image: node:20-alpine
+
+  cache:
+    key: "frontend-$CI_COMMIT_REF_SLUG"
+    paths:
+      - frontend/node_modules/
+
+  before_script:
+    - cd frontend
+    # CI=true делает create-react-app тесты неинтерактивными
+    - npm ci
+
+  script:
+    - CI=true npm test -- --passWithNoTests
+
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# =============================================================
+# СТАДИЯ: build
+# Запускается ТОЛЬКО при merge/push в ветку main
+# =============================================================
+
+# ── Сборка и публикация Backend образа ────────────────────────
+build:backend:
+  stage: build
+  before_script:
+    # Авторизоваться в GitLab Container Registry
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+  script:
+    # Сборка: используем target=production (multi-stage Dockerfile)
+    # Этап test в Dockerfile запускает npm test внутри сборки
+    - |
+      docker build \
+        --target production \
+        --cache-from $BACKEND_LATEST \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        -t $BACKEND_IMAGE \
+        -t $BACKEND_LATEST \
+        ./backend
+
+    # Публикация обоих тегов
+    - docker push $BACKEND_IMAGE
+    - docker push $BACKEND_LATEST
+
+    # Сохранить тег образа для последующих стадий
+    - echo "BACKEND_IMAGE=$BACKEND_IMAGE" >> build.env
+
+  # Передать переменные в следующие стадии
+  artifacts:
+    reports:
+      dotenv: build.env
+
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ── Сборка и публикация Frontend образа ───────────────────────
+build:frontend:
+  stage: build
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+
+  script:
+    - |
+      docker build \
+        --target production \
+        --cache-from $FRONTEND_LATEST \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --build-arg REACT_APP_API_URL=/api \
+        -t $FRONTEND_IMAGE \
+        -t $FRONTEND_LATEST \
+        ./frontend
+    - docker push $FRONTEND_IMAGE
+    - docker push $FRONTEND_LATEST
+    - echo "FRONTEND_IMAGE=$FRONTEND_IMAGE" >> build.env
+
+  artifacts:
+    reports:
+      dotenv: build.env
+
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# =============================================================
+# СТАДИЯ: scan
+# Trivy сканирует образы ПОСЛЕ сборки.
+# Блокирует деплой при обнаружении HIGH/CRITICAL уязвимостей.
+# =============================================================
+
+# ── Trivy: сканирование Backend ────────────────────────────────
+scan:backend:
+  stage: scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+
+  variables:
+    # Кэшировать базу уязвимостей между запусками
+    TRIVY_CACHE_DIR: ".trivycache/"
+
+  cache:
+    key: trivy-db
+    paths:
+      - .trivycache/
+
+  script:
+    # Сначала вывести все уязвимости (для информации, не блокирует)
+    - trivy image --exit-code 0 --severity LOW,MEDIUM
+        --format table $BACKEND_IMAGE
+    # Затем проверить HIGH/CRITICAL — блокировать если найдены
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL
+        --format table $BACKEND_IMAGE
+
+  # Сохранить отчёт как артефакт
+  after_script:
+    - trivy image --severity HIGH,CRITICAL
+        --format json
+        --output trivy-backend-report.json
+        $BACKEND_IMAGE || true
+
+  artifacts:
+    paths:
+      - trivy-backend-report.json
+    expire_in: 30d
+    when: always
+
+  needs:
+    - job: build:backend
+      artifacts: true
+
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ── Trivy: сканирование Frontend ────────────────────────────────
+scan:frontend:
+  stage: scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+
+  cache:
+    key: trivy-db
+    paths:
+      - .trivycache/
+
+  script:
+    - trivy image --exit-code 0 --severity LOW,MEDIUM
+        --format table $FRONTEND_IMAGE
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL
+        --format table $FRONTEND_IMAGE
+
+  after_script:
+    - trivy image --severity HIGH,CRITICAL
+        --format json
+        --output trivy-frontend-report.json
+        $FRONTEND_IMAGE || true
+
+  artifacts:
+    paths:
+      - trivy-frontend-report.json
+    expire_in: 30d
+    when: always
+
+  needs:
+    - job: build:frontend
+      artifacts: true
+
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# =============================================================
+# СТАДИЯ: deploy-staging
+# Автоматический деплой при merge в main (если scan прошёл)
+# =============================================================
+
+deploy:staging:
+  stage: deploy-staging
+  <<: *helm-deploy
+
+  environment:
+    name: staging
+    url: http://devtracker-staging.local
+
+  script:
+    - |
+      helm upgrade --install devtracker ./helm \
+        --namespace staging \
+        --create-namespace \
+        -f helm/values-staging.yaml \
+        --set backend.image.tag=$CI_COMMIT_SHORT_SHA \
+        --set frontend.image.tag=$CI_COMMIT_SHORT_SHA \
+        --set backend.secrets.dbPassword="$DB_PASSWORD" \
+        --set backend.secrets.jwtSecret="$JWT_SECRET" \
+        --set postgres.password="$DB_PASSWORD" \
+        --wait \
+        --timeout 5m \
+        --atomic   # Откатить если деплой не завершится успешно
+
+    # Проверить что поды запустились
+    - kubectl rollout status deployment/devtracker-backend  -n staging --timeout=120s
+    - kubectl rollout status deployment/devtracker-frontend -n staging --timeout=120s
+
+    # Проверить health endpoint
+    - |
+      for i in $(seq 1 10); do
+        if kubectl exec -n staging \
+          $(kubectl get pod -n staging -l app.kubernetes.io/component=backend -o jsonpath='{.items[0].metadata.name}') \
+          -- wget -qO- http://localhost:4000/health/ready 2>/dev/null; then
+          echo "Health check passed"
+          break
+        fi
+        echo "Waiting for health check... ($i/10)"
+        sleep 10
+      done
+
+  needs:
+    - job: scan:backend
+    - job: scan:frontend
+
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# =============================================================
+# СТАДИЯ: deploy-prod
+# ТОЛЬКО ВРУЧНУЮ. Нажать кнопку ▶ в GitLab UI.
+# =============================================================
+
+deploy:prod:
+  stage: deploy-prod
+  <<: *helm-deploy
+
+  environment:
+    name: production
+    url: http://devtracker.local
+
+  # when: manual — пайплайн остановится и будет ждать
+  # пока инженер не нажмёт кнопку запуска в GitLab UI
+  when: manual
+
+  before_script:
+    - mkdir -p ~/.kube
+    # Для prod используем отдельный kubeconfig
+    - echo "$KUBE_CONFIG_PROD" | base64 -d > ~/.kube/config
+    - chmod 600 ~/.kube/config
+
+  script:
+    - |
+      helm upgrade --install devtracker ./helm \
+        --namespace prod \
+        --create-namespace \
+        -f helm/values-prod.yaml \
+        --set backend.image.tag=$CI_COMMIT_SHORT_SHA \
+        --set frontend.image.tag=$CI_COMMIT_SHORT_SHA \
+        --set backend.secrets.dbPassword="$DB_PASSWORD" \
+        --set backend.secrets.jwtSecret="$JWT_SECRET" \
+        --set postgres.password="$DB_PASSWORD" \
+        --wait \
+        --timeout 10m \
+        --atomic
+
+    - kubectl rollout status deployment/devtracker-backend  -n prod --timeout=180s
+    - kubectl rollout status deployment/devtracker-frontend -n prod --timeout=180s
+
+  needs:
+    - job: deploy:staging
+
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# =============================================================
+# УВЕДОМЛЕНИЯ
+# =============================================================
+
+# ── Уведомление в Telegram при успехе ─────────────────────────
+notify:success:
+  stage: deploy-prod
+  image: alpine:3.18
+  when: on_success
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - |
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d parse_mode="HTML" \
+        -d text="✅ <b>DevTracker</b> успешно задеплоен в <b>staging</b>
+Branch: <code>${CI_COMMIT_BRANCH}</code>
+Commit: <code>${CI_COMMIT_SHORT_SHA}</code>
+Author: ${CI_COMMIT_AUTHOR}
+Pipeline: ${CI_PIPELINE_URL}"
+  needs:
+    - job: deploy:staging
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ── Уведомление в Telegram при ошибке ─────────────────────────
+notify:failure:
+  stage: deploy-prod
+  image: alpine:3.18
+  when: on_failure
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - |
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d parse_mode="HTML" \
+        -d text="❌ <b>ОШИБКА</b> в пайплайне DevTracker
+Branch: <code>${CI_COMMIT_BRANCH}</code>
+Commit: <code>${CI_COMMIT_SHORT_SHA}</code>
+Стадия: <code>${CI_JOB_STAGE}</code>
+Pipeline: ${CI_PIPELINE_URL}"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

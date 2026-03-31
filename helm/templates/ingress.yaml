@@ -1,0 +1,55 @@
+# =============================================================
+# templates/ingress.yaml — NGINX Ingress маршрутизация
+#
+# Ingress — это HTTP-маршрутизатор. Он принимает входящий
+# трафик снаружи кластера и распределяет его по Services.
+#
+# БЕЗ Ingress доступ к приложению только через NodePort
+# (прямой порт на ноде). Ingress позволяет:
+#   - Роутинг по пути (/api → backend, / → frontend)
+#   - TLS терминация
+#   - Rate limiting, аутентификация (через аннотации)
+#
+# Этот ресурс создаётся ТОЛЬКО если ingress.enabled: true
+# (задано в values.yaml)
+# =============================================================
+
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "devtracker.fullname" . }}-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.commonLabels" . | nindent 4 }}
+  annotations:
+    # Используем NGINX Ingress Controller
+    kubernetes.io/ingress.class: {{ .Values.ingress.className | quote }}
+    # Аннотации из values (таймаут, размер тела запроса и т.д.)
+    {{- with .Values.ingress.annotations }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                # .service — "backend" или "frontend" из values
+                # Преобразуем в полное имя Service
+                name: {{ include "devtracker.fullname" $ }}-{{ .service }}
+                port:
+                  {{- if eq .service "backend" }}
+                  number: {{ $.Values.backend.port }}
+                  {{- else }}
+                  number: {{ $.Values.frontend.port }}
+                  {{- end }}
+          {{- end }}
+    {{- end }}
+{{- end }}

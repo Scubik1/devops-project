@@ -1,0 +1,112 @@
+# =============================================================
+# templates/backend-deployment.yaml — Deployment для Node.js API
+#
+# Deployment управляет набором одинаковых подов (реплик).
+# K8s гарантирует что нужное число реплик всегда запущено.
+#
+# КЛЮЧЕВЫЕ КОНЦЕПЦИИ:
+#
+# securityContext (runAsNonRoot: true):
+#   Контейнер запускается от пользователя nodeuser (uid 1001),
+#   а не от root. Это требование ТЗ п. 4.8.
+#   Если контейнер попытается запуститься от root — K8s откажет.
+#
+# envFrom vs env:
+#   envFrom загружает ВСЕ ключи из ConfigMap/Secret как переменные.
+#   Это чище чем перечислять каждую переменную отдельно.
+#
+# resources.requests vs limits:
+#   requests — сколько гарантированно выделяется (для scheduling)
+#   limits    — максимум (OOMKill если превысит)
+# =============================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+  annotations:
+    # Дата последнего деплоя (для истории)
+    deployment.kubernetes.io/last-deployed: {{ now | date "2006-01-02T15:04:05Z" | quote }}
+spec:
+  # Количество реплик из values (staging=1, prod=3)
+  replicas: {{ .Values.backend.replicaCount }}
+
+  selector:
+    matchLabels:
+      {{- include "devtracker.backendSelectorLabels" . | nindent 6 }}
+
+  # Стратегия обновления — zero-downtime rolling update
+  strategy:
+    type: {{ .Values.backend.strategy.type }}
+    rollingUpdate:
+      maxSurge: {{ .Values.backend.strategy.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.backend.strategy.rollingUpdate.maxUnavailable }}
+
+  template:
+    metadata:
+      labels:
+        {{- include "devtracker.backendSelectorLabels" . | nindent 8 }}
+      annotations:
+        # checksum заставляет Deployment перезапуститься при изменении
+        # ConfigMap или Secret — без этого поды не перезапустятся
+        # при изменении конфигурации!
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        # Аннотация для Prometheus — указывает что этот под надо скрейпить
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.backend.port | quote }}
+        prometheus.io/path: "/metrics"
+    spec:
+      # Секрет для pull образов из GitLab Registry
+      imagePullSecrets:
+        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
+
+      # Контекст безопасности для всего пода
+      securityContext:
+        # Запрет запуска от root на уровне пода
+        runAsNonRoot: true
+        # UID пользователя nodeuser (из Dockerfile: adduser -u 1001)
+        runAsUser: 1001
+        runAsGroup: 1001
+
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.port }}
+              protocol: TCP
+
+          # Загрузить ВСЕ переменные из ConfigMap (несекретные)
+          envFrom:
+            - configMapRef:
+                name: {{ include "devtracker.fullname" . }}-backend-config
+            # Загрузить ВСЕ переменные из Secret (DB_PASSWORD, JWT_SECRET)
+            - secretRef:
+                name: {{ include "devtracker.backendSecretName" . }}
+
+          # Лимиты ресурсов (из values, разные для staging/prod)
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+
+          # Liveness probe: K8s перезапустит под если /health/live не отвечает
+          livenessProbe:
+            {{- toYaml .Values.backend.livenessProbe | nindent 12 }}
+
+          # Readiness probe: K8s не направляет трафик пока /health/ready не OK
+          # /health/ready проверяет подключение к PostgreSQL
+          readinessProbe:
+            {{- toYaml .Values.backend.readinessProbe | nindent 12 }}
+
+          # Контекст безопасности контейнера
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # Node.js нужно писать в /tmp
+            capabilities:
+              drop:
+                - ALL   # Убрать все Linux capabilities

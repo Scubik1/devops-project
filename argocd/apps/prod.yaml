@@ -1,0 +1,79 @@
+# =============================================================
+# argocd/apps/prod.yaml — ArgoCD Application для production
+#
+# РЕЖИМ: MANUAL SYNC (ручная синхронизация)
+#   В отличие от staging, production НЕ синхронизируется
+#   автоматически. Инженер должен явно нажать "Sync" в
+#   ArgoCD UI или выполнить команду:
+#     argocd app sync devtracker-prod
+#
+# ПОЧЕМУ MANUAL:
+#   Production — критическая среда. Автоматический деплой
+#   опасен даже если staging прошёл успешно. Нужен
+#   человеческий контроль: проверить staging, убедиться
+#   в работоспособности, затем нажать Sync.
+#
+# СВЯЗЬ С GITLAB CI:
+#   .gitlab-ci.yml содержит стадию deploy:prod с when: manual.
+#   Оба механизма работают независимо:
+#   - GitLab CI: helm upgrade напрямую (быстро)
+#   - ArgoCD: синхронизирует из Git (надёжно, есть история)
+#   В этом проекте используется GitLab CI для деплоя,
+#   ArgoCD для мониторинга состояния и drift detection.
+# =============================================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devtracker-prod
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: devtracker
+    environment: prod
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Более критичные уведомления для production
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: devops-prod
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: devops-prod
+    notifications.argoproj.io/subscribe.on-health-degraded.slack: devops-prod
+spec:
+  project: default
+
+  source:
+    repoURL: https://gitlab.com/yourorg/devtracker.git
+    targetRevision: main
+    path: helm
+
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+
+      parameters:
+        - name: backend.image.tag
+          value: $ARGOCD_APP_REVISION
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+
+  syncPolicy:
+    # НЕТ блока automated: — только ручная синхронизация
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - ServerSideApply=true
+
+    retry:
+      limit: 2
+      backoff:
+        duration: 15s
+        maxDuration: 120s
+        factor: 2
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

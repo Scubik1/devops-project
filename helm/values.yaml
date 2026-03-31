@@ -1,0 +1,229 @@
+# =============================================================
+# values.yaml — значения по умолчанию Helm Chart
+#
+# Этот файл содержит БАЗОВЫЕ значения, общие для всех окружений.
+# Они переопределяются файлами values-staging.yaml / values-prod.yaml
+#
+# СТРУКТУРА:
+#   backend.*    — настройки Node.js API
+#   frontend.*   — настройки React/Nginx
+#   postgres.*   — настройки PostgreSQL StatefulSet
+#   ingress.*    — настройки NGINX Ingress
+#   hpa.*        — настройки Horizontal Pod Autoscaler
+#   monitoring.* — ServiceMonitor для Prometheus
+#
+# СЕКРЕТЫ:
+#   Пароли и токены НЕ хранятся в values файлах.
+#   Они передаются через --set при деплое или через
+#   внешний Secret Manager (Vault, AWS Secrets Manager).
+#   Пример:
+#   helm upgrade --install devtracker ./helm \
+#     --set postgres.password=$DB_PASSWORD \
+#     --set backend.jwtSecret=$JWT_SECRET
+# =============================================================
+
+# ── Глобальные настройки ──────────────────────────────────────
+global:
+  # Имя Registry и namespace образа
+  # Переопределяется в CI/CD через --set global.imageRegistry
+  imageRegistry: "registry.gitlab.com/yourorg/devtracker"
+  imagePullSecrets:
+    - name: gitlab-registry-secret
+
+# ── Backend (Node.js Express API) ─────────────────────────────
+backend:
+  # Образ контейнера
+  image:
+    repository: "registry.gitlab.com/yourorg/devtracker/backend"
+    # tag переопределяется CI/CD: --set backend.image.tag=$CI_COMMIT_SHORT_SHA
+    tag: "latest"
+    pullPolicy: Always
+
+  # Количество реплик (переопределяется в values-staging/prod)
+  replicaCount: 2
+
+  # Порт приложения
+  port: 4000
+
+  # Переменные окружения (несекретные)
+  env:
+    NODE_ENV: "production"
+    PORT: "4000"
+    LOG_LEVEL: "info"
+    # DB_HOST формируется из имени Service PostgreSQL
+    DB_HOST: "devtracker-postgres"
+    DB_PORT: "5432"
+    DB_NAME: "devtracker"
+    DB_USER: "devtracker"
+
+  # Секреты (значения передаются при деплое, здесь только ключи)
+  # helm upgrade ... --set backend.secrets.dbPassword=$DB_PASS
+  secrets:
+    dbPassword: ""      # ОБЯЗАТЕЛЬНО передать при деплое
+    jwtSecret: ""       # ОБЯЗАТЕЛЬНО передать при деплое
+
+  # Лимиты ресурсов (переопределяются в values-staging/prod)
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Liveness probe — K8s перезапустит под если он перестал отвечать
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 4000
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    failureThreshold: 3
+    timeoutSeconds: 5
+
+  # Readiness probe — K8s не направляет трафик пока под не готов
+  # Проверяет подключение к БД через /health/ready
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 4000
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 5
+
+  # Стратегия обновления (zero-downtime)
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1         # Запустить 1 новый под ДО удаления старого
+      maxUnavailable: 0   # Не удалять старые поды пока новые не готовы
+
+# ── Frontend (React SPA + Nginx) ──────────────────────────────
+frontend:
+  image:
+    repository: "registry.gitlab.com/yourorg/devtracker/frontend"
+    tag: "latest"
+    pullPolicy: Always
+
+  replicaCount: 2
+
+  port: 3000
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 3000
+    initialDelaySeconds: 10
+    periodSeconds: 20
+
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 3000
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+# ── PostgreSQL (StatefulSet) ───────────────────────────────────
+postgres:
+  image:
+    repository: postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
+
+  # StatefulSet всегда имеет 1 реплику в этом проекте
+  # Для HA нужен отдельный оператор (Patroni, CloudNativePG)
+  replicaCount: 1
+
+  port: 5432
+
+  database: "devtracker"
+  username: "devtracker"
+  # password передаётся через --set postgres.password=... при деплое
+
+  # Размер PersistentVolumeClaim
+  storage:
+    size: "5Gi"
+    # StorageClass создаётся при установке local-path-provisioner
+    storageClass: "local-path"
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# ── Ingress ────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: "nginx"
+
+  # Аннотации NGINX Ingress Controller
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+
+  # Хосты (переопределяются в values-staging/prod)
+  hosts:
+    - host: devtracker.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+        - path: /api
+          pathType: Prefix
+          service: backend
+        - path: /health
+          pathType: Prefix
+          service: backend
+        - path: /metrics
+          pathType: Prefix
+          service: backend
+
+# ── Horizontal Pod Autoscaler ─────────────────────────────────
+hpa:
+  enabled: true
+
+  backend:
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  frontend:
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+
+# ── NetworkPolicy ──────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+
+# ── PodDisruptionBudget ────────────────────────────────────────
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# ── Мониторинг (Prometheus ServiceMonitor) ────────────────────
+monitoring:
+  enabled: true
+  # Лейбл для Prometheus Operator — должен совпадать с
+  # параметром prometheus.prometheusSpec.serviceMonitorSelector
+  prometheusRelease: "kube-prometheus-stack"
+  scrapeInterval: "30s"

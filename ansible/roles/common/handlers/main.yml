@@ -1,0 +1,14 @@
+# =============================================================
+# roles/common/handlers/main.yml
+#
+# Handlers выполняются ОДИН РАЗ в конце play, только если
+# их вызвал хотя бы один task через notify.
+# Это предотвращает лишние рестарты сервисов.
+# =============================================================
+
+---
+- name: restart chrony
+  ansible.builtin.service:
+    name: chrony
+    state: restarted
+    enabled: true

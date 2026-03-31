@@ -1,0 +1,105 @@
+# =============================================================
+# roles/containerd/tasks/main.yml
+#
+# Устанавливает и настраивает containerd — container runtime.
+#
+# ПОЧЕМУ containerd, а не Docker?
+#   Начиная с Kubernetes 1.24, поддержка Docker как runtime
+#   была удалена. Kubernetes работает напрямую с containerd
+#   через интерфейс CRI (Container Runtime Interface).
+#   containerd — это тот же движок, который использует Docker
+#   внутри себя.
+#
+# КЛЮЧЕВОЙ МОМЕНТ: SystemdCgroup = true
+#   По умолчанию containerd использует cgroupfs для управления
+#   ресурсами контейнеров. Но systemd тоже управляет cgroups.
+#   Если они используют разные драйверы — возникают конфликты.
+#   Решение: настроить containerd использовать systemd cgroups.
+# =============================================================
+
+---
+# ── 1. Добавить официальный репозиторий Docker ────────────────
+# containerd распространяется через репозиторий Docker Inc.
+- name: "Скачать GPG ключ репозитория Docker"
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+    force: false   # Не скачивать повторно если уже есть
+  tags: [containerd]
+
+- name: "Добавить репозиторий Docker"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu
+      {{ ansible_distribution_release }} stable
+    state: present
+    filename: docker
+  tags: [containerd]
+
+# ── 2. Установить containerd ──────────────────────────────────
+- name: "Обновить кэш apt после добавления репозитория"
+  ansible.builtin.apt:
+    update_cache: true
+  tags: [containerd]
+
+- name: "Установить containerd.io"
+  ansible.builtin.apt:
+    name: containerd.io
+    state: present
+  notify: restart containerd
+  tags: [containerd]
+
+# ── 3. Настроить containerd ───────────────────────────────────
+- name: "Создать директорию конфигурации containerd"
+  ansible.builtin.file:
+    path: /etc/containerd
+    state: directory
+    mode: '0755'
+  tags: [containerd, config]
+
+- name: "Сгенерировать конфигурацию containerd по умолчанию"
+  ansible.builtin.command: containerd config default
+  register: containerd_default_config
+  changed_when: false
+  tags: [containerd, config]
+
+- name: "Сохранить конфигурацию containerd"
+  ansible.builtin.copy:
+    content: "{{ containerd_default_config.stdout }}"
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+  notify: restart containerd
+  tags: [containerd, config]
+
+- name: "Включить SystemdCgroup в конфигурации containerd"
+  # Это КРИТИЧЕСКИ ВАЖНАЯ настройка.
+  # Без неё kubelet и containerd будут конфликтовать за cgroups,
+  # что приведёт к нестабильной работе подов.
+  ansible.builtin.replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+  notify: restart containerd
+  tags: [containerd, config]
+
+# ── 4. Включить и запустить containerd ───────────────────────
+- name: "Включить и запустить сервис containerd"
+  ansible.builtin.service:
+    name: containerd
+    state: started
+    enabled: true
+  tags: [containerd]
+
+# ── 5. Проверка установки ─────────────────────────────────────
+- name: "Проверить что containerd запущен"
+  ansible.builtin.command: ctr version
+  register: ctr_version
+  changed_when: false
+  tags: [containerd, verify]
+
+- name: "Вывести версию containerd"
+  ansible.builtin.debug:
+    msg: "containerd установлен: {{ ctr_version.stdout_lines[0] }}"
+  tags: [containerd, verify]

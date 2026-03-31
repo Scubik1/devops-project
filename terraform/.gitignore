@@ -1,0 +1,17 @@
+# Terraform state — содержит IP-адреса и может содержать секреты
+# В production хранить в remote backend (S3/GitLab managed)
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+
+# Директория с плагинами провайдеров (скачиваются при terraform init)
+.terraform/
+.terraform.lock.hcl
+
+# Файл с реальными значениями (может содержать SSH-ключи)
+terraform.tfvars
+
+# Временные файлы
+*.tfplan
+crash.log
+crash.*.log

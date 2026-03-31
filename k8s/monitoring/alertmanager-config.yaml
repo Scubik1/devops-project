@@ -1,0 +1,148 @@
+# =============================================================
+# k8s/monitoring/alertmanager-config.yaml
+# Конфигурация AlertManager — маршрутизация алертов
+#
+# AlertManager получает алерты от Prometheus и решает:
+#   - Кому отправить (Telegram, Slack, Email, PagerDuty...)
+#   - Когда отправить (немедленно vs после задержки)
+#   - Как группировать (не спамить 100 одинаковыми алертами)
+#   - Когда заглушить (maintenance window)
+#
+# МАРШРУТИЗАЦИЯ (routing tree):
+#   Все алерты → группировка
+#   severity=critical → Telegram (немедленно)
+#   severity=warning  → Telegram (через 5 минут)
+#   app=devtracker    → Telegram devtracker канал
+# =============================================================
+
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: devtracker-alertmanager-config
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  # ── Маршрутизация алертов ──────────────────────────────────
+  route:
+    # Группировать алерты с одинаковыми значениями этих полей
+    groupBy: ['alertname', 'namespace', 'severity']
+
+    # Ждать перед отправкой первой нотификации группы
+    # (собрать несколько алертов в одно сообщение)
+    groupWait: 30s
+
+    # Интервал отправки нотификаций для одной группы
+    groupInterval: 5m
+
+    # Повторная отправка если алерт не resolved
+    repeatInterval: 12h
+
+    # Получатель по умолчанию
+    receiver: telegram-critical
+
+    # Дочерние маршруты (проверяются по порядку)
+    routes:
+      # Critical алерты → немедленно
+      - matchers:
+          - name: severity
+            value: critical
+        receiver: telegram-critical
+        groupWait: 10s       # Меньше задержка для critical
+        repeatInterval: 4h   # Напоминать каждые 4 часа
+
+      # Warning алерты → с задержкой
+      - matchers:
+          - name: severity
+            value: warning
+        receiver: telegram-warning
+        groupWait: 5m
+        repeatInterval: 24h
+
+      # DevTracker алерты → в отдельный канал
+      - matchers:
+          - name: app
+            value: devtracker
+        receiver: telegram-devtracker
+
+  # ── Получатели (receivers) ──────────────────────────────────
+  receivers:
+    # Critical: немедленные уведомления
+    - name: telegram-critical
+      telegramConfigs:
+        - botToken:
+            # Токен из K8s Secret (не хранить в открытом виде!)
+            key: telegram-bot-token
+            name: alertmanager-telegram-secret
+          chatID: -1001234567890   # ID канала/группы (отрицательный для групп)
+          parseMode: HTML
+          message: |
+            🚨 <b>КРИТИЧЕСКИЙ АЛЕРТ</b>
+            <b>{{ .GroupLabels.alertname }}</b>
+
+            {{ range .Alerts }}
+            📍 <b>Namespace:</b> {{ .Labels.namespace }}
+            📊 <b>Severity:</b> {{ .Labels.severity }}
+            📝 {{ .Annotations.summary }}
+            🔍 {{ .Annotations.description }}
+            {{ if .Annotations.runbook_url }}📚 <a href="{{ .Annotations.runbook_url }}">Runbook</a>{{ end }}
+            ⏰ Начало: {{ .StartsAt.Format "15:04:05 02.01.2006" }}
+            {{ end }}
+
+    # Warning: менее срочные уведомления
+    - name: telegram-warning
+      telegramConfigs:
+        - botToken:
+            key: telegram-bot-token
+            name: alertmanager-telegram-secret
+          chatID: -1001234567890
+          parseMode: HTML
+          message: |
+            ⚠️ <b>Предупреждение</b>
+            <b>{{ .GroupLabels.alertname }}</b>
+
+            {{ range .Alerts }}
+            📍 {{ .Labels.namespace }} / {{ .Labels.pod }}
+            📝 {{ .Annotations.summary }}
+            {{ end }}
+
+    # DevTracker специфичные уведомления
+    - name: telegram-devtracker
+      telegramConfigs:
+        - botToken:
+            key: telegram-bot-token
+            name: alertmanager-telegram-secret
+          chatID: -1001234567890
+          parseMode: HTML
+          message: |
+            🔔 <b>DevTracker Alert</b>
+            {{ .GroupLabels.alertname }}
+
+            {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}
+
+  # ── Заглушки (inhibit rules) ────────────────────────────────
+  # Если сервис полностью упал (critical) — не отправлять
+  # мелкие warning алерты о нём (они и так понятны)
+  inhibitRules:
+    - sourceMatch:
+        - name: severity
+          value: critical
+      targetMatch:
+        - name: severity
+          value: warning
+      # Заглушать только если это один и тот же компонент
+      equal: ['alertname', 'namespace']
+---
+# Secret с токеном Telegram бота
+# ЗАМЕНИТЬ на реальный токен!
+# Создать бота: @BotFather в Telegram
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-telegram-secret
+  namespace: monitoring
+type: Opaque
+stringData:
+  # Получить токен у @BotFather: /newbot
+  # Формат: 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+  telegram-bot-token: "REPLACE_WITH_REAL_TOKEN"

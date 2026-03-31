@@ -1,0 +1,129 @@
+# =============================================================
+# roles/common/tasks/main.yml
+#
+# Базовая настройка каждой ноды кластера.
+# Выполняется ПЕРВОЙ, перед установкой containerd и K8s.
+#
+# Задачи сгруппированы по тегам для возможности частичного
+# переприменения: ansible-playbook site.yml --tags swap
+# =============================================================
+
+---
+# ── 1. Обновление пакетов ─────────────────────────────────────
+- name: "Обновить кэш apt"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600   # Не обновлять если кэш свежее 1 часа
+  tags: [packages]
+
+- name: "Установить базовые утилиты"
+  ansible.builtin.apt:
+    name:
+      - curl
+      - wget
+      - apt-transport-https
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - net-tools
+      - htop
+      - vim
+      - jq              # Для парсинга JSON (полезно при отладке K8s)
+      - bash-completion # Автодополнение kubectl
+    state: present
+  tags: [packages]
+
+# ── 2. Настройка временной зоны и NTP ────────────────────────
+- name: "Установить временную зону"
+  community.general.timezone:
+    name: "{{ timezone }}"
+  tags: [time]
+
+- name: "Установить chrony (NTP клиент)"
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+  tags: [time]
+
+- name: "Настроить NTP серверы"
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    mode: '0644'
+  notify: restart chrony
+  tags: [time]
+
+# ── 3. Отключение swap ────────────────────────────────────────
+# kubeadm ТРЕБУЕТ отключённый swap. Если swap включён,
+# kubeadm init завершится с ошибкой.
+- name: "Отключить swap немедленно"
+  ansible.builtin.command: swapoff -a
+  changed_when: false    # Команда идемпотентна — не помечать как changed
+  tags: [swap]
+
+- name: "Удалить записи swap из /etc/fstab (отключить постоянно)"
+  ansible.builtin.replace:
+    path: /etc/fstab
+    # Комментируем строки со словом 'swap'
+    regexp: '^([^#].*\s+swap\s+.*)$'
+    replace: '# \1'
+  tags: [swap]
+
+# ── 4. Настройка модулей ядра ─────────────────────────────────
+# overlay    — нужен для хранилища контейнеров (overlayfs)
+# br_netfilter — нужен чтобы iptables видел bridged трафик K8s
+
+- name: "Создать файл для загрузки модулей ядра"
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      # Модули ядра для Kubernetes (загружаются автоматически при старте)
+      overlay
+      br_netfilter
+    mode: '0644'
+  tags: [kernel]
+
+- name: "Загрузить модули ядра немедленно"
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ kernel_modules }}"
+  tags: [kernel]
+
+# ── 5. Настройка sysctl ───────────────────────────────────────
+# Параметры ядра, необходимые для корректной работы сети K8s
+- name: "Применить параметры sysctl для Kubernetes"
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    reload: true
+  loop: "{{ sysctl_params | dict2items }}"
+  tags: [kernel, sysctl]
+
+# ── 6. Настройка hostname ─────────────────────────────────────
+- name: "Установить hostname"
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+    use: systemd
+  tags: [hostname]
+
+- name: "Добавить все ноды в /etc/hosts"
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED — K8s cluster nodes"
+    block: |
+      192.168.56.10  k8s-control-plane
+      192.168.56.11  k8s-worker-01
+      192.168.56.12  k8s-worker-02
+  tags: [hostname]
+
+# ── 7. Отключить ufw (межсетевой экран) ─────────────────────
+# K8s управляет сетевыми правилами через iptables/Calico.
+# UFW может блокировать трафик между нодами.
+- name: "Отключить UFW (не конфликтовать с K8s networking)"
+  community.general.ufw:
+    state: disabled
+  ignore_errors: true   # Может не быть установлен
+  tags: [firewall]

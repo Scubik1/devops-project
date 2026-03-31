@@ -1,0 +1,161 @@
+# =============================================================
+# templates/network-policy.yaml — сетевые политики безопасности
+#
+# NetworkPolicy работает только если CNI поддерживает их.
+# В нашем проекте используется Calico — полная поддержка.
+# Flannel — НЕ поддерживает NetworkPolicy!
+#
+# МОДЕЛЬ БЕЗОПАСНОСТИ (default-deny):
+#   1. Запрещаем весь входящий трафик в namespace по умолчанию
+#   2. Явно разрешаем только нужные соединения
+#
+# В результате:
+#   - PostgreSQL доступен ТОЛЬКО из backend подов (порт 5432)
+#   - Backend доступен из frontend и Ingress Controller (порт 4000)
+#   - Frontend доступен из Ingress Controller (порт 3000)
+#   - DNS (UDP 53) разрешён для всех — иначе Service Discovery сломается
+# =============================================================
+
+{{- if .Values.networkPolicy.enabled }}
+
+# ── 1. Default deny all: запрет всего входящего трафика ────────
+# Применяется ко ВСЕМ подам в namespace.
+# Последующие политики добавляют исключения.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "devtracker.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.commonLabels" . | nindent 4 }}
+spec:
+  podSelector: {}   # Пустой selector = применять ко ВСЕМ подам
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # Разрешить DNS для всех подов (обязательно!)
+    # Без этого имена сервисов не резолвятся → приложение не работает
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# ── 2. PostgreSQL: принимать ТОЛЬКО от backend ─────────────────
+# Это ключевое требование ТЗ п. 4.8:
+# "NetworkPolicy: PostgreSQL принимает трафик только от backend"
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "devtracker.fullname" . }}-postgres-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.postgresLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "devtracker.postgresSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Разрешить только от backend подов
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "devtracker.backendSelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.postgres.port }}
+---
+# ── 3. Backend: принимать от frontend и Ingress ─────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "devtracker.backendSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # От frontend (прямые запросы через Service)
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "devtracker.frontendSelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.port }}
+    # От Ingress Controller (внешние HTTP запросы к /api)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.port }}
+    # От Prometheus (scrape метрик /metrics)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.port }}
+  egress:
+    # Разрешить подключение к PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "devtracker.postgresSelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.postgres.port }}
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+---
+# ── 4. Frontend: принимать от Ingress ──────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "devtracker.fullname" . }}-frontend-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.frontendLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "devtracker.frontendSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: {{ .Values.frontend.port }}
+  egress:
+    # Frontend (Nginx) проксирует /api → backend
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "devtracker.backendSelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backend.port }}
+    - ports:
+        - protocol: UDP
+          port: 53
+
+{{- end }}

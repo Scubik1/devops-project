@@ -1,0 +1,208 @@
+# =============================================================
+# k8s/logging/fluentd-values.yaml
+# Конфигурация Fluentd — агент сбора логов
+#
+# Fluentd устанавливается как DaemonSet — по одному поду
+# на каждую ноду кластера. Он читает логи из файлов
+# /var/log/containers/*.log и отправляет в Elasticsearch.
+#
+# PIPELINE ОБРАБОТКИ ЛОГОВ:
+#   Source (файл)
+#     → Filter (парсинг, обогащение метаданными K8s)
+#     → Match (маршрутизация в Elasticsearch)
+#
+# РАЗДЕЛЕНИЕ ЛОГОВ (требование ТЗ п. 4.7.5):
+#   Логи приложения (namespace staging/prod) → индекс app-logs-YYYY.MM.DD
+#   Системные логи (namespace kube-system)   → индекс system-logs-YYYY.MM.DD
+# =============================================================
+
+# Версия образа Fluentd
+image:
+  repository: fluent/fluentd-kubernetes-daemonset
+  tag: "v1.16.2-debian-elasticsearch8-1.0"
+
+# DaemonSet нужен доступ к файлам логов на ноде
+volumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+  - name: varlibdockercontainers
+    hostPath:
+      path: /var/lib/docker/containers
+
+volumeMounts:
+  - name: varlog
+    mountPath: /var/log
+  - name: varlibdockercontainers
+    mountPath: /var/lib/docker/containers
+    readOnly: true
+
+# Tolerations: запускать на ALL нодах, включая control-plane
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "200Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# ── Конфигурация Fluentd ──────────────────────────────────────
+fileConfigs:
+  # 01_sources.conf — откуда читать логи
+  01_sources.conf: |
+    # Читать логи из /var/log/containers/*.log
+    # Kubernetes ротирует эти файлы
+    <source>
+      @type tail
+      @id input_tail
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_type string
+          time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+          keep_time_key false
+        </pattern>
+        <pattern>
+          format regexp
+          expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+          time_format '%Y-%m-%dT%H:%M:%S.%NZ'
+        </pattern>
+      </parse>
+    </source>
+
+  # 02_filters.conf — обогащение метаданными K8s
+  02_filters.conf: |
+    # Добавить к каждой записи метаданные пода:
+    # namespace, pod_name, container_name, labels
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+      kubernetes_url "https://#{ENV['KUBERNETES_SERVICE_HOST']}:#{ENV['KUBERNETES_SERVICE_PORT']}/api"
+      verify_ssl false
+      # Кэш metadata (уменьшает нагрузку на API server)
+      cache_size 1000
+      cache_ttl 3600
+    </filter>
+
+    # Парсить JSON логи из Node.js (Winston logger выводит JSON)
+    <filter kubernetes.**>
+      @type parser
+      @id filter_parse_app_log
+      key_name log
+      reserve_data true
+      remove_key_name_field true
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+        </pattern>
+        <pattern>
+          format none
+        </pattern>
+      </parse>
+    </filter>
+
+    # Фильтр: добавить поле environment на основе namespace
+    <filter kubernetes.**>
+      @type record_transformer
+      @id filter_add_environment
+      <record>
+        # Определить окружение по namespace
+        environment ${record.dig("kubernetes", "namespace_name") == "prod" ? "production" : record.dig("kubernetes", "namespace_name") == "staging" ? "staging" : "system"}
+        # Добавить hostname ноды
+        node_name "#{ENV['NODE_NAME']}"
+        # Временная метка в читаемом формате
+        log_time ${time.strftime('%Y-%m-%d %H:%M:%S')}
+      </record>
+    </filter>
+
+  # 03_dispatch.conf — маршрутизация по типу логов
+  03_dispatch.conf: |
+    # Системные логи (kube-system, argocd, monitoring)
+    <match kubernetes.var.log.containers.**_kube-system_**.log>
+      @type relabel
+      @label @SYSTEM_LOGS
+    </match>
+
+    <match kubernetes.var.log.containers.**_argocd_**.log>
+      @type relabel
+      @label @SYSTEM_LOGS
+    </match>
+
+    <match kubernetes.var.log.containers.**_monitoring_**.log>
+      @type relabel
+      @label @SYSTEM_LOGS
+    </match>
+
+    # Логи приложения (staging, prod)
+    <match kubernetes.var.log.containers.**_staging_**.log>
+      @type relabel
+      @label @APP_LOGS
+    </match>
+
+    <match kubernetes.var.log.containers.**_prod_**.log>
+      @type relabel
+      @label @APP_LOGS
+    </match>
+
+    # Все остальные → системные
+    <match kubernetes.**>
+      @type relabel
+      @label @SYSTEM_LOGS
+    </match>
+
+  # 04_outputs.conf — отправка в Elasticsearch
+  04_outputs.conf: |
+    # ── Логи приложения → app-logs-YYYY.MM.DD ────────────────
+    <label @APP_LOGS>
+      <match **>
+        @type elasticsearch
+        @id output_es_app
+        host elasticsearch-master
+        port 9200
+        scheme http
+        # Динамическое имя индекса с датой (для ротации)
+        index_name app-logs-%Y.%m.%d
+        <buffer time>
+          @type file
+          path /var/log/fluentd-buffers/app
+          flush_mode interval
+          flush_interval 10s
+          # Если Elasticsearch недоступен — буферизовать на диске
+          overflow_action block
+        </buffer>
+      </match>
+    </label>
+
+    # ── Системные логи → system-logs-YYYY.MM.DD ──────────────
+    <label @SYSTEM_LOGS>
+      <match **>
+        @type elasticsearch
+        @id output_es_system
+        host elasticsearch-master
+        port 9200
+        scheme http
+        index_name system-logs-%Y.%m.%d
+        <buffer time>
+          @type file
+          path /var/log/fluentd-buffers/system
+          flush_mode interval
+          flush_interval 30s
+          overflow_action block
+        </buffer>
+      </match>
+    </label>

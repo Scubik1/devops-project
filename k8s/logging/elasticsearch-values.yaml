@@ -1,0 +1,72 @@
+# =============================================================
+# k8s/logging/elasticsearch-values.yaml
+# Конфигурация Elasticsearch для EFK стека
+#
+# ВАЖНО: Elasticsearch очень требователен к ресурсам!
+# Минимум для работы: 2 GB RAM на под.
+# Убедитесь что worker-ноды имеют 4+ GB RAM.
+#
+# НАСТРОЙКА vm.max_map_count:
+# Elasticsearch требует vm.max_map_count >= 262144.
+# Ansible роль common уже устанавливает этот параметр
+# через sysctl. Если не установлен — под не запустится.
+# =============================================================
+
+# Количество нод Elasticsearch
+# 1 нода достаточно для разработки/обучения
+replicas: 1
+
+# Elasticsearch версия (должна совпадать с Kibana!)
+imageTag: "8.5.1"
+
+# Ресурсы
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "1000m"
+    memory: "2Gi"
+
+# Переменные окружения Elasticsearch
+esConfig:
+  elasticsearch.yml: |
+    # Имя кластера (для идентификации)
+    cluster.name: "devtracker-logs"
+
+    # Режим одной ноды (для обучения)
+    discovery.type: single-node
+
+    # Отключить безопасность (упростить для обучения)
+    # В production ВКЛЮЧИТЬ: xpack.security.enabled: true
+    xpack.security.enabled: false
+
+    # Индекс жизненного цикла — включить ILM
+    xpack.ilm.enabled: true
+
+    # Ограничить Java heap (50% от limits.memory)
+    # Задаётся через переменную окружения ниже
+
+esJavaOpts: "-Xmx1g -Xms1g"   # Java heap = 1 GB (50% от limit 2 GB)
+
+# Persistent Volume
+volumeClaimTemplate:
+  storageClassName: "local-path"
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: "10Gi"
+
+# Service — ClusterIP (Fluentd подключается внутри кластера)
+service:
+  type: ClusterIP
+  port: 9200
+
+# Проверка здоровья
+readinessProbe:
+  initialDelaySeconds: 30   # Elasticsearch долго стартует
+  periodSeconds: 15
+  timeoutSeconds: 10
+
+# Отключить pod disruption budget (для single-node)
+maxUnavailable: 1

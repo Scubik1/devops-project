@@ -1,0 +1,113 @@
+# =============================================================
+# k8s/namespaces/namespaces.yaml
+# Определения namespace кластера
+#
+# ПОЧЕМУ создавать namespace явно?
+#   Можно полагаться на --create-namespace в Helm, но явные
+#   манифесты дают:
+#   1. Метки namespace — нужны для NetworkPolicy
+#      (namespaceSelector по kubernetes.io/metadata.name)
+#   2. ResourceQuota — ограничения ресурсов на namespace
+#   3. LimitRange — дефолтные limits для подов без явных limits
+#   4. Явный контроль — видно в Git что namespace существует
+# =============================================================
+
+# ── Namespace: staging ─────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    # Эта метка используется в NetworkPolicy namespaceSelector!
+    kubernetes.io/metadata.name: staging
+    environment: staging
+    app.kubernetes.io/managed-by: argocd
+---
+# ── Namespace: prod ────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    kubernetes.io/metadata.name: prod
+    environment: production
+    app.kubernetes.io/managed-by: argocd
+---
+# ── Namespace: monitoring ──────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    kubernetes.io/metadata.name: monitoring
+---
+# ── Namespace: argocd ──────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    kubernetes.io/metadata.name: argocd
+---
+# ── ResourceQuota для staging ──────────────────────────────────
+# Ограничения чтобы staging не "съел" все ресурсы кластера
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: staging-quota
+  namespace: staging
+spec:
+  hard:
+    # Максимум CPU (requests) в namespace
+    requests.cpu: "2"
+    # Максимум RAM (requests)
+    requests.memory: "4Gi"
+    # Максимум CPU (limits)
+    limits.cpu: "4"
+    limits.memory: "8Gi"
+    # Максимум подов
+    pods: "20"
+    # Максимум Services
+    services: "10"
+    # Максимум PVC
+    persistentvolumeclaims: "5"
+---
+# ── LimitRange для staging ─────────────────────────────────────
+# Дефолтные limits для контейнеров без явных limits
+# Предотвращает "безлимитные" контейнеры
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: staging-limits
+  namespace: staging
+spec:
+  limits:
+    - type: Container
+      default:             # Дефолтные limits (если не указаны в Pod spec)
+        cpu: "200m"
+        memory: "256Mi"
+      defaultRequest:      # Дефолтные requests
+        cpu: "50m"
+        memory: "64Mi"
+      max:                 # Максимальные limits (нельзя превысить)
+        cpu: "1000m"
+        memory: "1Gi"
+      min:                 # Минимальные requests
+        cpu: "10m"
+        memory: "16Mi"
+---
+# ── ResourceQuota для prod ─────────────────────────────────────
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: prod-quota
+  namespace: prod
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    pods: "30"
+    services: "10"
+    persistentvolumeclaims: "10"

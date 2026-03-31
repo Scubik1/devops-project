@@ -1,0 +1,112 @@
+# =============================================================
+# roles/kubernetes/tasks/main.yml
+#
+# Устанавливает kubeadm, kubelet, kubectl на все ноды.
+#
+# Три компонента:
+#   kubeadm — инструмент инициализации кластера (запускается один раз)
+#   kubelet  — агент, запущенный на каждой ноде (демон)
+#   kubectl  — CLI для управления кластером (нужен на control-plane)
+#
+# ФИКСАЦИЯ ВЕРСИЙ (apt-mark hold):
+#   Kubernetes очень требователен к версиям компонентов.
+#   Если apt автоматически обновит kubelet без обновления
+#   kubeadm — кластер может сломаться. Поэтому мы "замораживаем"
+#   версии командой apt-mark hold.
+# =============================================================
+
+---
+# ── 1. Добавить официальный репозиторий Kubernetes ────────────
+- name: "Создать директорию для GPG ключей"
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  tags: [kubernetes]
+
+- name: "Скачать GPG ключ репозитория Kubernetes"
+  ansible.builtin.get_url:
+    url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key"
+    dest: "/etc/apt/keyrings/kubernetes-{{ k8s_version }}.asc"
+    mode: '0644'
+    force: false
+  tags: [kubernetes]
+
+- name: "Добавить репозиторий Kubernetes {{ k8s_version }}"
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/kubernetes-{{ k8s_version }}.asc]
+      https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
+    state: present
+    filename: "kubernetes-{{ k8s_version }}"
+  tags: [kubernetes]
+
+# ── 2. Установить компоненты ──────────────────────────────────
+- name: "Обновить кэш apt"
+  ansible.builtin.apt:
+    update_cache: true
+  tags: [kubernetes]
+
+- name: "Установить kubeadm, kubelet, kubectl"
+  ansible.builtin.apt:
+    name:
+      - "kubelet={{ k8s_full_version }}"
+      - "kubeadm={{ k8s_full_version }}"
+      - "kubectl={{ k8s_full_version }}"
+    state: present
+    allow_downgrade: true   # Разрешить установку конкретной версии
+  tags: [kubernetes]
+
+# ── 3. ЗАФИКСИРОВАТЬ версии (apt-mark hold) ───────────────────
+# Это ключевое требование ТЗ п. 4.1.7:
+# "Зафиксировать версию K8s-компонентов (apt-mark hold)"
+- name: "Зафиксировать версии K8s компонентов (apt-mark hold)"
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+  tags: [kubernetes, hold]
+
+# ── 4. Включить и запустить kubelet ───────────────────────────
+# kubelet запускается как systemd service на каждой ноде.
+# До инициализации кластера он будет периодически перезапускаться
+# (это нормально — он ждёт kubeadm init/join).
+- name: "Включить и запустить kubelet"
+  ansible.builtin.service:
+    name: kubelet
+    state: started
+    enabled: true
+  tags: [kubernetes]
+
+# ── 5. Настроить автодополнение kubectl (только control-plane) ─
+- name: "Настроить bash completion для kubectl"
+  ansible.builtin.shell: |
+    kubectl completion bash > /etc/bash_completion.d/kubectl
+  changed_when: false
+  when: "'control_plane' in group_names"
+  tags: [kubernetes, kubectl]
+
+# ── 6. Проверка ────────────────────────────────────────────────
+- name: "Проверить версию kubectl"
+  ansible.builtin.command: kubectl version --client -o yaml
+  register: kubectl_version
+  changed_when: false
+  failed_when: false
+  tags: [kubernetes, verify]
+ 
+- name: "Проверить версию kubeadm"
+  ansible.builtin.command: kubeadm version -o short
+  register: kubeadm_version
+  changed_when: false
+  failed_when: false
+  tags: [kubernetes, verify]
+ 
+- name: "Вывести версии K8s компонентов"
+  ansible.builtin.debug:
+    msg:
+      - "kubectl: {{ kubectl_version.stdout_lines | select('search', 'gitVersion') | first | default('version check failed') }}"
+      - "kubeadm: {{ kubeadm_version.stdout | default('version check failed') }}"
+  tags: [kubernetes, verify]

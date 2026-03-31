@@ -1,0 +1,233 @@
+# =============================================================
+# k8s/monitoring/prometheus-rules.yaml
+# Правила алертинга для приложения DevTracker
+#
+# PrometheusRule — CRD от Prometheus Operator.
+# Prometheus Operator читает этот ресурс и добавляет правила
+# в конфигурацию Prometheus автоматически.
+#
+# СТРУКТУРА ПРАВИЛА:
+#   alert:       — имя алерта
+#   expr:        — PromQL выражение (true = алерт активен)
+#   for:         — как долго условие должно выполняться
+#   labels:      — метки для маршрутизации в AlertManager
+#   annotations: — человекочитаемое описание
+#
+# ТЕСТИРОВАНИЕ ПРАВИЛ:
+#   kubectl exec -n monitoring prometheus-pod -- promtool check rules /etc/prometheus/rules/...
+# =============================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: devtracker-alerts
+  namespace: monitoring
+  labels:
+    # Эта метка ОБЯЗАТЕЛЬНА — Prometheus Operator ищет правила по ней
+    release: kube-prometheus-stack
+    app: devtracker
+spec:
+  groups:
+
+    # ─────────────────────────────────────────────────────────
+    # Группа 1: Доступность приложения
+    # ─────────────────────────────────────────────────────────
+    - name: devtracker.availability
+      interval: 30s    # Проверять каждые 30 секунд
+      rules:
+
+        # Алерт: backend полностью недоступен
+        - alert: DevTrackerBackendDown
+          expr: |
+            absent(
+              up{
+                job=~".*devtracker-backend.*"
+              } == 1
+            )
+          for: 2m    # Алертить если недоступен более 2 минут
+          labels:
+            severity: critical
+            app: devtracker
+            component: backend
+          annotations:
+            summary: "DevTracker Backend полностью недоступен"
+            description: >
+              Нет ни одного healthy инстанса backend.
+              Namespace: {{ $labels.namespace }}.
+              Проверить: kubectl get pods -n staging -l app.kubernetes.io/component=backend
+            runbook_url: "https://gitlab.com/yourorg/devtracker/-/wikis/runbooks/backend-down"
+
+        # Алерт: высокий процент ошибок 5xx
+        - alert: DevTrackerHighErrorRate
+          expr: |
+            (
+              rate(http_requests_total{
+                job=~".*devtracker-backend.*",
+                code=~"5.."
+              }[5m])
+              /
+              rate(http_requests_total{
+                job=~".*devtracker-backend.*"
+              }[5m])
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            app: devtracker
+          annotations:
+            summary: "Высокий процент ошибок 5xx (>5%)"
+            description: >
+              Процент ошибок: {{ humanizePercentage $value }}.
+              Namespace: {{ $labels.namespace }}.
+
+    # ─────────────────────────────────────────────────────────
+    # Группа 2: Производительность
+    # ─────────────────────────────────────────────────────────
+    - name: devtracker.performance
+      rules:
+
+        # Алерт: медленные запросы (p95 > 2 секунды)
+        - alert: DevTrackerSlowRequests
+          expr: |
+            histogram_quantile(0.95,
+              rate(http_request_duration_seconds_bucket{
+                job=~".*devtracker-backend.*"
+              }[5m])
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+            app: devtracker
+          annotations:
+            summary: "Медленные API запросы (p95 > 2s)"
+            description: "95-й перцентиль задержки: {{ humanizeDuration $value }}"
+
+        # Алерт: высокое потребление CPU
+        - alert: DevTrackerHighCPU
+          expr: |
+            rate(container_cpu_usage_seconds_total{
+              namespace=~"staging|prod",
+              pod=~"devtracker-backend.*"
+            }[5m]) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            app: devtracker
+          annotations:
+            summary: "Высокое потребление CPU (>80%)"
+            description: "Pod {{ $labels.pod }}: CPU {{ humanizePercentage $value }}"
+
+    # ─────────────────────────────────────────────────────────
+    # Группа 3: Состояние подов
+    # ─────────────────────────────────────────────────────────
+    - name: devtracker.pods
+      rules:
+
+        # Алерт: под перезапускается (CrashLoopBackOff)
+        - alert: DevTrackerPodCrashLooping
+          expr: |
+            rate(kube_pod_container_status_restarts_total{
+              namespace=~"staging|prod",
+              pod=~"devtracker-.*"
+            }[15m]) * 60 > 0
+          for: 5m
+          labels:
+            severity: critical
+            app: devtracker
+          annotations:
+            summary: "Под {{ $labels.pod }} постоянно перезапускается"
+            description: >
+              Pod {{ $labels.pod }} в namespace {{ $labels.namespace }}
+              перезапускается. Проверить логи:
+              kubectl logs {{ $labels.pod }} -n {{ $labels.namespace }} --previous
+
+        # Алерт: нет доступных реплик
+        - alert: DevTrackerNoAvailableReplicas
+          expr: |
+            kube_deployment_status_available_replicas{
+              namespace=~"staging|prod",
+              deployment=~"devtracker-.*"
+            } < 1
+          for: 2m
+          labels:
+            severity: critical
+            app: devtracker
+          annotations:
+            summary: "Нет доступных реплик для {{ $labels.deployment }}"
+            description: >
+              Deployment {{ $labels.deployment }} в {{ $labels.namespace }}
+              не имеет ни одной доступной реплики.
+
+        # Алерт: под в состоянии Pending слишком долго
+        - alert: DevTrackerPodPendingTooLong
+          expr: |
+            kube_pod_status_phase{
+              namespace=~"staging|prod",
+              pod=~"devtracker-.*",
+              phase="Pending"
+            } == 1
+          for: 10m
+          labels:
+            severity: warning
+            app: devtracker
+          annotations:
+            summary: "Под {{ $labels.pod }} в Pending более 10 минут"
+            description: >
+              Возможные причины: нет ресурсов на нодах, образ не скачивается,
+              PVC не привязан. Проверить:
+              kubectl describe pod {{ $labels.pod }} -n {{ $labels.namespace }}
+
+    # ─────────────────────────────────────────────────────────
+    # Группа 4: База данных
+    # ─────────────────────────────────────────────────────────
+    - name: devtracker.database
+      rules:
+
+        # Алерт: PostgreSQL недоступен
+        - alert: DevTrackerPostgresDown
+          expr: |
+            absent(
+              kube_pod_status_ready{
+                namespace=~"staging|prod",
+                pod=~"devtracker-postgres.*",
+                condition="true"
+              } == 1
+            )
+          for: 2m
+          labels:
+            severity: critical
+            app: devtracker
+            component: database
+          annotations:
+            summary: "PostgreSQL недоступен"
+            description: >
+              StatefulSet devtracker-postgres не имеет ready подов.
+              kubectl get pods -n staging -l app.kubernetes.io/component=database
+
+    # ─────────────────────────────────────────────────────────
+    # Группа 5: Хранилище
+    # ─────────────────────────────────────────────────────────
+    - name: devtracker.storage
+      rules:
+
+        # Алерт: PVC почти заполнен
+        - alert: DevTrackerPVCAlmostFull
+          expr: |
+            (
+              kubelet_volume_stats_used_bytes{
+                namespace=~"staging|prod",
+                persistentvolumeclaim=~"postgres-data.*"
+              }
+              /
+              kubelet_volume_stats_capacity_bytes{
+                namespace=~"staging|prod",
+                persistentvolumeclaim=~"postgres-data.*"
+              }
+            ) > 0.80
+          for: 5m
+          labels:
+            severity: warning
+            app: devtracker
+          annotations:
+            summary: "PVC {{ $labels.persistentvolumeclaim }} заполнен на >80%"
+            description: "Использовано {{ humanizePercentage $value }} доступного места."

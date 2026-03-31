@@ -1,0 +1,38 @@
+# =============================================================
+# terraform.tfvars.example — пример файла значений
+#
+# КАК ИСПОЛЬЗОВАТЬ:
+#   1. Скопировать этот файл:
+#      cp terraform.tfvars.example terraform.tfvars
+#   2. Заполнить реальные значения
+#   3. terraform.tfvars добавлен в .gitignore — не коммитится
+#
+# ВАЖНО: Никогда не коммитьте terraform.tfvars в Git если он
+# содержит чувствительные данные (ключи, пароли).
+# =============================================================
+
+# Имя кластера — будет использоваться как префикс ВМ
+cluster_name = "k8s"
+
+# Путь к OVA образу Ubuntu 22.04
+# Скачать образ: https://releases.ubuntu.com/22.04/
+# Конвертировать VMDK в OVA:
+#   VBoxManage import ubuntu-22.04-server-cloudimg-amd64.ova
+base_image_path = "/path/to/ubuntu-22.04-amd64.ova"
+
+# Публичный SSH-ключ
+# Сгенерировать если нет: ssh-keygen -t ed25519 -C "k8s-cluster" -f ~/.ssh/k8s_rsa
+# Вставить содержимое ~/.ssh/k8s_rsa.pub
+ssh_public_key = "ssh-ed25519 AAAA... your@email.com"
+
+# Сетевые настройки (менять только если 192.168.56.x уже занята)
+control_plane_ip = "192.168.56.10"
+worker_ips       = ["192.168.56.11", "192.168.56.12"]
+gateway          = "192.168.56.1"
+
+# Ресурсы (уменьшить если не хватает RAM на хост-машине)
+# Минимум для EFK: worker_memory_mb = 4096
+control_plane_cpus      = 2
+control_plane_memory_mb = 4096
+worker_cpus             = 2
+worker_memory_mb        = 4096

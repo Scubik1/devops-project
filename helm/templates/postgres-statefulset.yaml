@@ -1,0 +1,96 @@
+# =============================================================
+# templates/postgres-statefulset.yaml — PostgreSQL StatefulSet + PVC
+#
+# ПОЧЕМУ StatefulSet, а не Deployment?
+#
+# Deployment: поды stateless, при пересоздании данные теряются.
+#   Подходит для: backend, frontend — данные в БД, не в поде.
+#
+# StatefulSet: поды stateful, каждый под имеет:
+#   - Стабильное сетевое имя: postgres-0, postgres-1
+#   - Собственный PersistentVolume (данные НЕ теряются при рестарте)
+#   - Гарантированный порядок запуска/остановки
+#
+# ВАЖНО про PVC:
+#   PVC (PersistentVolumeClaim) — это "запрос на диск".
+#   К8s ищет PersistentVolume, подходящий по размеру и
+#   StorageClass, и "привязывает" его к поду.
+#   В нашем случае StorageClass: local-path (локальный диск ноды).
+# =============================================================
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "devtracker.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.postgresLabels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "devtracker.fullname" . }}-postgres
+  replicas: {{ .Values.postgres.replicaCount }}
+
+  selector:
+    matchLabels:
+      {{- include "devtracker.postgresSelectorLabels" . | nindent 6 }}
+
+  template:
+    metadata:
+      labels:
+        {{- include "devtracker.postgresSelectorLabels" . | nindent 8 }}
+    spec:
+      # fsGroup: все процессы в поде и PVC получают эту GID
+      # PostgreSQL (uid 999) должен иметь права на запись в /var/lib/postgresql
+      securityContext:
+        fsGroup: 999
+
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+
+          ports:
+            - containerPort: {{ .Values.postgres.port }}
+              name: postgres
+
+          # Загрузить учётные данные из Secret
+          envFrom:
+            - secretRef:
+                name: {{ include "devtracker.postgresSecretName" . }}
+
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+
+          # Liveness: K8s перезапустит если pg_isready не работает
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.postgres.username }}"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 5
+
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.postgres.username }}"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          volumeMounts:
+            # Монтируем PVC в стандартную директорию данных PostgreSQL
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+  # volumeClaimTemplates — K8s создаёт PVC для каждого пода автоматически.
+  # При удалении StatefulSet PVC НЕ удаляется — данные сохраняются.
+  # Удалить PVC вручную: kubectl delete pvc postgres-data-<name>-postgres-0
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+        labels:
+          {{- include "devtracker.postgresLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce   # Один под может читать/писать одновременно
+        storageClassName: {{ .Values.postgres.storage.storageClass }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage.size }}

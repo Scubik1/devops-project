@@ -1,0 +1,50 @@
+# =============================================================
+# templates/service-monitor.yaml — Prometheus ServiceMonitor
+#
+# ServiceMonitor — это Custom Resource Definition (CRD) от
+# Prometheus Operator (входит в kube-prometheus-stack).
+#
+# КАК РАБОТАЕТ:
+#   1. kube-prometheus-stack устанавливает Prometheus Operator
+#   2. Operator смотрит на объекты ServiceMonitor в кластере
+#   3. Находит наш ServiceMonitor → добавляет backend Service
+#      в конфигурацию Prometheus как target для scrape
+#   4. Prometheus каждые scrapeInterval секунд делает GET /metrics
+#      и сохраняет метрики в свою TSDB
+#
+# Метки:
+#   release: kube-prometheus-stack — должна совпадать с именем
+#   Helm release kube-prometheus-stack. Prometheus Operator
+#   ищет ServiceMonitor по этой метке.
+# =============================================================
+
+{{- if .Values.monitoring.enabled }}
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend-monitor
+  # ServiceMonitor должен быть в namespace monitoring, чтобы
+  # Prometheus Operator его нашёл
+  namespace: monitoring
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+    # Эта метка обязательна — Prometheus Operator фильтрует
+    # ServiceMonitor по ней
+    release: {{ .Values.monitoring.prometheusRelease }}
+spec:
+  # В каких namespace искать Service для scrape
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  # Какой Service скрейпить (по лейблам)
+  selector:
+    matchLabels:
+      {{- include "devtracker.backendSelectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http          # Имя порта из Service (name: http)
+      path: /metrics      # Endpoint метрик Prometheus
+      interval: {{ .Values.monitoring.scrapeInterval }}
+      scrapeTimeout: "10s"
+
+{{- end }}

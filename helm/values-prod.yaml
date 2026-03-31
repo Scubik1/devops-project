@@ -1,0 +1,89 @@
+# =============================================================
+# values-prod.yaml — переопределения для PRODUCTION окружения
+#
+# Применяется командой (через ArgoCD или вручную):
+#   helm upgrade --install devtracker ./helm \
+#     -f helm/values-prod.yaml \
+#     --set backend.secrets.dbPassword=$DB_PASS \
+#     --set backend.secrets.jwtSecret=$JWT_SECRET \
+#     --set postgres.password=$DB_PASS \
+#     -n prod
+#
+# В этом проекте production деплой управляется ArgoCD
+# (argocd/apps/prod.yaml) и требует ручного подтверждения.
+# =============================================================
+
+# ── Backend ───────────────────────────────────────────────────
+backend:
+  replicaCount: 3   # 3 реплики в production для отказоустойчивости
+
+  env:
+    LOG_LEVEL: "warn"    # Только важные сообщения в production
+    NODE_ENV: "production"
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# ── Frontend ──────────────────────────────────────────────────
+frontend:
+  replicaCount: 2
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# ── PostgreSQL ────────────────────────────────────────────────
+postgres:
+  storage:
+    size: "10Gi"   # Больший диск в production
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+# ── Ingress ───────────────────────────────────────────────────
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # В production можно добавить rate limiting:
+    # nginx.ingress.kubernetes.io/limit-rps: "100"
+
+  hosts:
+    - host: devtracker.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: frontend
+        - path: /api
+          pathType: Prefix
+          service: backend
+        - path: /health
+          pathType: Prefix
+          service: backend
+        - path: /metrics
+          pathType: Prefix
+          service: backend
+
+# ── HPA ───────────────────────────────────────────────────────
+hpa:
+  backend:
+    minReplicas: 2
+    maxReplicas: 8   # Больше реплик при пиковой нагрузке
+
+  frontend:
+    minReplicas: 2
+    maxReplicas: 4

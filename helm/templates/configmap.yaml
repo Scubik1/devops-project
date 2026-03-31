@@ -1,0 +1,41 @@
+# =============================================================
+# templates/configmap.yaml — несекретная конфигурация
+#
+# ConfigMap содержит переменные окружения которые НЕ являются
+# секретами: порты, имена сервисов, уровень логирования и т.д.
+#
+# Backend Pod получает переменные двумя способами:
+#   1. envFrom configMapRef  → все ключи из ConfigMap
+#   2. envFrom secretRef     → все ключи из Secret
+# Это позволяет не перечислять каждую переменную отдельно.
+# =============================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "devtracker.fullname" . }}-backend-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "devtracker.backendLabels" . | nindent 4 }}
+  annotations:
+    description: "Несекретная конфигурация Backend API"
+data:
+  # Порт на котором слушает Express сервер
+  PORT: {{ .Values.backend.port | quote }}
+
+  # Окружение Node.js
+  NODE_ENV: {{ .Values.backend.env.NODE_ENV | quote }}
+
+  # Уровень логирования (из values-staging/prod)
+  LOG_LEVEL: {{ .Values.backend.env.LOG_LEVEL | quote }}
+
+  # Настройки подключения к PostgreSQL
+  # DB_HOST = имя K8s Service PostgreSQL в том же namespace
+  DB_HOST: {{ .Values.backend.env.DB_HOST | quote }}
+  DB_PORT: {{ .Values.backend.env.DB_PORT | quote }}
+  DB_NAME: {{ .Values.backend.env.DB_NAME | quote }}
+  DB_USER: {{ .Values.backend.env.DB_USER | quote }}
+
+  # CORS: разрешаем запросы только с frontend Service
+  # В K8s сервисы доступны по имени: http://<service-name>:<port>
+  FRONTEND_URL: "http://{{ include "devtracker.fullname" . }}-frontend:{{ .Values.frontend.port }}"

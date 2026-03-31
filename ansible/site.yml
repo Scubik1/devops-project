@@ -1,0 +1,58 @@
+# =============================================================
+# site.yml — главный playbook
+#
+# Запускает все роли в правильном порядке.
+# Порядок важен: containerd должен быть установлен ДО kubernetes,
+# а common — перед обоими.
+#
+# КАК ЗАПУСКАТЬ:
+#   # Полная установка всех нод
+#   ansible-playbook site.yml
+#
+#   # Только конкретные теги (быстрое переприменение)
+#   ansible-playbook site.yml --tags swap,kernel
+#
+#   # Только одна нода (отладка)
+#   ansible-playbook site.yml --limit k8s-control-plane
+#
+#   # Dry-run (показать что изменится, ничего не менять)
+#   ansible-playbook site.yml --check --diff
+#
+# ИДЕМПОТЕНТНОСТЬ:
+#   Playbook можно запускать повторно — он не сломает
+#   то что уже настроено. Это ключевой принцип Ansible.
+# =============================================================
+
+---
+# ── Play 1: Базовая настройка ВСЕХ нод ──────────────────────
+# Роль common: обновление пакетов, отключение swap,
+# настройка ядра, NTP, hostname
+- name: "Базовая настройка нод кластера"
+  hosts: k8s_cluster
+  become: true
+
+  roles:
+    - role: common
+      tags: [common, always]
+
+# ── Play 2: Установка containerd на ВСЕ ноды ────────────────
+# containerd — container runtime, который использует Kubernetes
+# (Docker как runtime был удалён в K8s 1.24+)
+- name: "Установка containerd (container runtime)"
+  hosts: k8s_cluster
+  become: true
+
+  roles:
+    - role: containerd
+      tags: [containerd, runtime]
+
+# ── Play 3: Установка K8s компонентов на ВСЕ ноды ───────────
+# Устанавливает kubeadm, kubelet, kubectl
+# Версии зафиксированы через apt-mark hold
+- name: "Установка Kubernetes компонентов (kubeadm, kubelet, kubectl)"
+  hosts: k8s_cluster
+  become: true
+
+  roles:
+    - role: kubernetes
+      tags: [kubernetes, k8s]
