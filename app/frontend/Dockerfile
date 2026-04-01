@@ -1,5 +1,5 @@
 # ── Stage 1: Build React app ───────────────────────────
-FROM node:20-alpine AS builder
+FROM node:25.8.2-alpine3.23 AS builder
 
 WORKDIR /app
 
@@ -15,9 +15,9 @@ ENV REACT_APP_API_URL=$REACT_APP_API_URL
 RUN npm run build
 
 # ── Stage 2: Serve via Nginx ────────────────────────────
-FROM nginx:1.25-alpine AS production
+FROM nginx:1.29.7-alpine3.23-perl AS production
 
-LABEL maintainer="devops-team"
+LABEL maintainer="scubik"
 LABEL app="devtracker-frontend"
 
 # Remove default nginx config

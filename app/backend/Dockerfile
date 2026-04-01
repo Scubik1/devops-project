@@ -1,5 +1,5 @@
 # ── Stage 1: dependencies ──────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:25.8.2-alpine3.23 AS deps
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
 
 # ── Stage 2: test (optional, run in CI) ────────────────────
-FROM node:20-alpine AS test
+FROM node:25.8.2-alpine3.23 AS test
 
 WORKDIR /app
 COPY package*.json ./
@@ -17,9 +17,9 @@ COPY . .
 RUN npm test -- --passWithNoTests
 
 # ── Stage 3: production image ───────────────────────────────
-FROM node:20-alpine AS production
+FROM node:25.8.2-alpine3.23 AS production
 
-LABEL maintainer="devops-team"
+LABEL maintainer="scubik"
 LABEL app="devtracker-backend"
 
 # Security: run as non-root

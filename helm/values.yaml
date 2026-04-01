@@ -26,7 +26,7 @@
 global:
   # Имя Registry и namespace образа
   # Переопределяется в CI/CD через --set global.imageRegistry
-  imageRegistry: "registry.gitlab.com/yourorg/devtracker"
+  imageRegistry: "registry.gitlab.com/scubik/devtracker"
   imagePullSecrets:
     - name: gitlab-registry-secret
 
@@ -34,7 +34,7 @@ global:
 backend:
   # Образ контейнера
   image:
-    repository: "registry.gitlab.com/yourorg/devtracker/backend"
+    repository: "registry.gitlab.com/scubik/devtracker/backend"
     # tag переопределяется CI/CD: --set backend.image.tag=$CI_COMMIT_SHORT_SHA
     tag: "latest"
     pullPolicy: Always
@@ -102,7 +102,7 @@ backend:
 # ── Frontend (React SPA + Nginx) ──────────────────────────────
 frontend:
   image:
-    repository: "registry.gitlab.com/yourorg/devtracker/frontend"
+    repository: "registry.gitlab.com/scubik/devtracker/frontend"
     tag: "latest"
     pullPolicy: Always
 

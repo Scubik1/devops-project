@@ -5,5 +5,5 @@ test('index.html renders root element', () => {
   const div = document.createElement('div');
   div.setAttribute('id', 'root');
   document.body.appendChild(div);
-  expect(div).toBeInTheDocument();
+  expect(document.getElementById('root')).not.toBeNull();
 });

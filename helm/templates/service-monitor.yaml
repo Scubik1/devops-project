@@ -23,7 +23,7 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "devtracker.fullname" . }}-backend-monitor
+  name: {{ include "devtracker.fullname" . }}-{{ .Release.Namespace }}-backend-monitor
   # ServiceMonitor должен быть в namespace monitoring, чтобы
   # Prometheus Operator его нашёл
   namespace: monitoring

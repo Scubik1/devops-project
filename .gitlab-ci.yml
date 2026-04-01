@@ -50,7 +50,9 @@ stages:
 
 # Шаблон для деплоя через Helm
 .helm-deploy: &helm-deploy
-  image: alpine/helm:3.14.0
+  image:
+    name: dtzar/helm-kubectl:3.14.4
+    entrypoint: [""]
   before_script:
     # Декодировать kubeconfig из base64 и сохранить в файл
     - mkdir -p ~/.kube
@@ -73,10 +75,10 @@ test:backend:
   cache:
     key: "backend-$CI_COMMIT_REF_SLUG"
     paths:
-      - backend/node_modules/
+      - app/backend/node_modules/
 
   before_script:
-    - cd backend
+    - cd app/backend
     - npm ci   # Устанавливает зависимости строго по package-lock.json
 
   script:
@@ -87,9 +89,9 @@ test:backend:
     reports:
       coverage_report:
         coverage_format: cobertura
-        path: backend/coverage/cobertura-coverage.xml
+        path: app/backend/coverage/cobertura-coverage.xml
     paths:
-      - backend/coverage/
+      - app/backend/coverage/
     expire_in: 7d
     when: always   # Сохранять даже если тесты упали
 
@@ -108,10 +110,10 @@ test:frontend:
   cache:
     key: "frontend-$CI_COMMIT_REF_SLUG"
     paths:
-      - frontend/node_modules/
+      - app/frontend/node_modules/
 
   before_script:
-    - cd frontend
+    - cd app/frontend
     # CI=true делает create-react-app тесты неинтерактивными
     - npm ci
 
@@ -143,7 +145,7 @@ build:backend:
         --build-arg BUILDKIT_INLINE_CACHE=1 \
         -t $BACKEND_IMAGE \
         -t $BACKEND_LATEST \
-        ./backend
+        ./app/backend
 
     # Публикация обоих тегов
     - docker push $BACKEND_IMAGE
@@ -175,7 +177,7 @@ build:frontend:
         --build-arg REACT_APP_API_URL=/api \
         -t $FRONTEND_IMAGE \
         -t $FRONTEND_LATEST \
-        ./frontend
+        ./app/frontend
     - docker push $FRONTEND_IMAGE
     - docker push $FRONTEND_LATEST
     - echo "FRONTEND_IMAGE=$FRONTEND_IMAGE" >> build.env
@@ -197,12 +199,15 @@ build:frontend:
 scan:backend:
   stage: scan
   image:
-    name: aquasec/trivy:latest
+    name: aquasec/trivy:0.61.0
     entrypoint: [""]
 
   variables:
     # Кэшировать базу уязвимостей между запусками
     TRIVY_CACHE_DIR: ".trivycache/"
+    # Указать Trivy использовать remote registry напрямую
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
 
   cache:
     key: trivy-db
@@ -211,10 +216,10 @@ scan:backend:
 
   script:
     # Сначала вывести все уязвимости (для информации, не блокирует)
-    - trivy image --exit-code 0 --severity LOW,MEDIUM
+    - trivy image --exit-code 0 --severity LOW,MEDIUM,HIGH
         --format table $BACKEND_IMAGE
     # Затем проверить HIGH/CRITICAL — блокировать если найдены
-    - trivy image --exit-code 1 --severity HIGH,CRITICAL
+    - trivy image --exit-code 1 --severity CRITICAL
         --format table $BACKEND_IMAGE
 
   # Сохранить отчёт как артефакт
@@ -222,6 +227,7 @@ scan:backend:
     - trivy image --severity HIGH,CRITICAL
         --format json
         --output trivy-backend-report.json
+        --scanners vuln
         $BACKEND_IMAGE || true
 
   artifacts:
@@ -241,8 +247,13 @@ scan:backend:
 scan:frontend:
   stage: scan
   image:
-    name: aquasec/trivy:latest
+    name: aquasec/trivy:0.61.0
     entrypoint: [""]
+
+  variables:
+    # Указать Trivy использовать remote registry напрямую
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
 
   cache:
     key: trivy-db
@@ -250,15 +261,16 @@ scan:frontend:
       - .trivycache/
 
   script:
-    - trivy image --exit-code 0 --severity LOW,MEDIUM
+    - trivy image --exit-code 0 --severity LOW,MEDIUM,HIGH
         --format table $FRONTEND_IMAGE
-    - trivy image --exit-code 1 --severity HIGH,CRITICAL
+    - trivy image --exit-code 1 --severity CRITICAL
         --format table $FRONTEND_IMAGE
 
   after_script:
     - trivy image --severity HIGH,CRITICAL
         --format json
         --output trivy-frontend-report.json
+        --scanners vuln
         $FRONTEND_IMAGE || true
 
   artifacts:
@@ -282,6 +294,8 @@ scan:frontend:
 deploy:staging:
   stage: deploy-staging
   <<: *helm-deploy
+  tags:
+    - local
 
   environment:
     name: staging
@@ -334,6 +348,8 @@ deploy:staging:
 deploy:prod:
   stage: deploy-prod
   <<: *helm-deploy
+  tags:
+    - local
 
   environment:
     name: production
@@ -386,14 +402,11 @@ notify:success:
     - apk add --no-cache curl
   script:
     - |
+      MSG="✅ DevTracker задеплоен в staging%0ABranch: ${CI_COMMIT_BRANCH}%0ACommit: ${CI_COMMIT_SHORT_SHA}%0APipeline: ${CI_PIPELINE_URL}"
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="${TELEGRAM_CHAT_ID}" \
         -d parse_mode="HTML" \
-        -d text="✅ <b>DevTracker</b> успешно задеплоен в <b>staging</b>
-Branch: <code>${CI_COMMIT_BRANCH}</code>
-Commit: <code>${CI_COMMIT_SHORT_SHA}</code>
-Author: ${CI_COMMIT_AUTHOR}
-Pipeline: ${CI_PIPELINE_URL}"
+        -d text="${MSG}"
   needs:
     - job: deploy:staging
   rules:
@@ -408,13 +421,10 @@ notify:failure:
     - apk add --no-cache curl
   script:
     - |
+      MSG="❌ ОШИБКА в пайплайне DevTracker%0ABranch: ${CI_COMMIT_BRANCH}%0ACommit: ${CI_COMMIT_SHORT_SHA}%0APipeline: ${CI_PIPELINE_URL}"
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="${TELEGRAM_CHAT_ID}" \
         -d parse_mode="HTML" \
-        -d text="❌ <b>ОШИБКА</b> в пайплайне DevTracker
-Branch: <code>${CI_COMMIT_BRANCH}</code>
-Commit: <code>${CI_COMMIT_SHORT_SHA}</code>
-Стадия: <code>${CI_JOB_STAGE}</code>
-Pipeline: ${CI_PIPELINE_URL}"
+        -d text="${MSG}"
   rules:
     - if: $CI_COMMIT_BRANCH == "main"

@@ -136,8 +136,8 @@ router.patch(
     body('description').optional().trim().isLength({ max: 5000 }),
     body('status').optional().isIn(['todo', 'in_progress', 'review', 'done']),
     body('priority').optional().isIn(['low', 'medium', 'high', 'critical']),
-    body('assignee_id').optional().isInt({ min: 1 }).nullable(),
-    body('due_date').optional().isISO8601().toDate().nullable(),
+    body('assignee_id').optional({ nullable: true }).isInt({ min: 1 }),
+    body('due_date').optional({ nullable: true }).isISO8601().toDate(),
   ],
   async (req, res, next) => {
     const errors = validationResult(req);

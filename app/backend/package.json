@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "jest --coverage",
+    "test": "jest --coverage  --forceExit",
     "test:watch": "jest --watch",
     "migrate": "node src/db/migrations.js"
   },
