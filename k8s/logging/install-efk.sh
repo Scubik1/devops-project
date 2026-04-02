@@ -29,15 +29,16 @@ MONITORING_NS="monitoring"
 
 # ── 1. Добавить Helm репозиторий Elastic ─────────────────────
 log "Добавление Helm репозитория Elastic..."
-helm repo add elastic https://helm.elastic.co
+#helm repo add elastic https://helm.elastic.co
+helm repo add bitnami https://charts.bitnami.com/bitnami
 helm repo add fluent  https://fluent.github.io/helm-charts
 helm repo update
 
 # ── 2. Установить Elasticsearch ──────────────────────────────
 log "Установка Elasticsearch..."
-helm upgrade --install elasticsearch elastic/elasticsearch \
+helm upgrade --install elasticsearch bitnami/elasticsearch \
   --namespace "$MONITORING_NS" \
-  --version "8.5.1" \
+  --version "21.2.2" \
   -f k8s/logging/elasticsearch-values.yaml \
   --wait \
   --timeout 10m
@@ -46,9 +47,9 @@ log "Elasticsearch установлен!"
 
 # ── 3. Установить Kibana ─────────────────────────────────────
 log "Установка Kibana..."
-helm upgrade --install kibana elastic/kibana \
+helm upgrade --install kibana bitnami/kibana \
   --namespace "$MONITORING_NS" \
-  --version "8.5.1" \
+  --version "11.2.5" \
   -f k8s/logging/kibana-values.yaml \
   --wait \
   --timeout 5m

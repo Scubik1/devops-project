@@ -17,7 +17,15 @@
 replicas: 1
 
 # Elasticsearch версия (должна совпадать с Kibana!)
-imageTag: "8.5.1"
+imageTag: "8.14.0"
+
+# Отключить автоматическое добавление cluster.initial_master_nodes
+clusterInitialMasterNodes: []
+
+# Перезаписать env переменную которую чарт добавляет автоматически
+extraEnv:
+  - name: cluster.initial_master_nodes
+    value: ""
 
 # Ресурсы
 resources:
@@ -42,7 +50,7 @@ esConfig:
     xpack.security.enabled: false
 
     # Индекс жизненного цикла — включить ILM
-    xpack.ilm.enabled: true
+    # xpack.ilm.enabled: true
 
     # Ограничить Java heap (50% от limits.memory)
     # Задаётся через переменную окружения ниже
