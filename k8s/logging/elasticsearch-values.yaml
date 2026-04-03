@@ -14,18 +14,19 @@
 
 # Количество нод Elasticsearch
 # 1 нода достаточно для разработки/обучения
-replicas: 1
+replicas: 2
 
 # Elasticsearch версия (должна совпадать с Kibana!)
-imageTag: "8.14.0"
+imageTag: "8.5.1"
 
-# Отключить автоматическое добавление cluster.initial_master_nodes
+# Отключаем автоматическую генерацию cluster.initial_master_nodes (если нужно)
 clusterInitialMasterNodes: []
 
-# Перезаписать env переменную которую чарт добавляет автоматически
-extraEnv:
-  - name: cluster.initial_master_nodes
-    value: ""
+# Явно задаём роли узлов
+roles:
+  - master
+  - data
+  - ingest
 
 # Ресурсы
 resources:
@@ -43,7 +44,9 @@ esConfig:
     cluster.name: "devtracker-logs"
 
     # Режим одной ноды (для обучения)
-    discovery.type: single-node
+    #discovery.type: multi-node
+
+    cluster.initial_master_nodes: ["elasticsearch-master-0", "elasticsearch-master-1"]
 
     # Отключить безопасность (упростить для обучения)
     # В production ВКЛЮЧИТЬ: xpack.security.enabled: true

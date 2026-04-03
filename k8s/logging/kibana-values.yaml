@@ -10,7 +10,7 @@
 #   5. Фильтровать: kubernetes.namespace_name : staging
 # =============================================================
 
-imageTag: "8.14.0"
+imageTag: "8.5.1"
 
 # Kibana подключается к Elasticsearch по имени Service
 elasticsearchHosts: "http://elasticsearch-master:9200"
