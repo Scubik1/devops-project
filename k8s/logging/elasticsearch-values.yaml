@@ -1,34 +1,25 @@
 # =============================================================
 # k8s/logging/elasticsearch-values.yaml
-# Конфигурация Elasticsearch для EFK стека
+# Конфигурация Elasticsearch — Security Edition v7
 #
-# ВАЖНО: Elasticsearch очень требователен к ресурсам!
-# Минимум для работы: 2 GB RAM на под.
-# Убедитесь что worker-ноды имеют 4+ GB RAM.
+# ИСПРАВЛЕНИЕ v7:
+#   transport.ssl — убраны keystore.path и truststore.path.
+#   ES не позволяет смешивать PEM (certificate/key) и keystore
+#   в одной SSL-секции. Используем только PEM для обоих:
+#   HTTP и transport.
 #
-# НАСТРОЙКА vm.max_map_count:
-# Elasticsearch требует vm.max_map_count >= 262144.
-# Ansible роль common уже устанавливает этот параметр
-# через sysctl. Если не установлен — под не запустится.
+#   Для transport verification_mode: certificate достаточно —
+#   ноды доверяют друг другу по общему CA-сертификату.
 # =============================================================
 
-# Количество нод Elasticsearch
-# 1 нода достаточно для разработки/обучения
 replicas: 2
-
-# Elasticsearch версия (должна совпадать с Kibana!)
 imageTag: "8.5.1"
 
-# Отключаем автоматическую генерацию cluster.initial_master_nodes (если нужно)
-clusterInitialMasterNodes: []
-
-# Явно задаём роли узлов
 roles:
   - master
   - data
   - ingest
 
-# Ресурсы
 resources:
   requests:
     cpu: "500m"
@@ -37,30 +28,44 @@ resources:
     cpu: "1000m"
     memory: "2Gi"
 
-# Переменные окружения Elasticsearch
+esJavaOpts: "-Xmx1g -Xms1g"
+
 esConfig:
   elasticsearch.yml: |
-    # Имя кластера (для идентификации)
     cluster.name: "devtracker-logs"
+    cluster.initial_master_nodes:
+      - "elasticsearch-master-0"
+      - "elasticsearch-master-1"
 
-    # Режим одной ноды (для обучения)
-    #discovery.type: multi-node
+    xpack.security.enabled: true
 
-    cluster.initial_master_nodes: ["elasticsearch-master-0", "elasticsearch-master-1"]
+    # ── HTTP TLS (порт 9200) ──────────────────────────────────
+    xpack.security.http.ssl.enabled: true
+    xpack.security.http.ssl.key: /usr/share/elasticsearch/config/tls/elastic.key
+    xpack.security.http.ssl.certificate: /usr/share/elasticsearch/config/tls/elastic.crt
+    xpack.security.http.ssl.certificate_authorities:
+      - /usr/share/elasticsearch/config/tls/elastic.crt
 
-    # Отключить безопасность (упростить для обучения)
-    # В production ВКЛЮЧИТЬ: xpack.security.enabled: true
-    xpack.security.enabled: false
+    # ── Transport TLS (порт 9300, связь между нодами) ─────────
+    # Только PEM — нельзя смешивать с keystore.path!
+    xpack.security.transport.ssl.enabled: true
+    xpack.security.transport.ssl.verification_mode: certificate
+    xpack.security.transport.ssl.key: /usr/share/elasticsearch/config/tls/elastic.key
+    xpack.security.transport.ssl.certificate: /usr/share/elasticsearch/config/tls/elastic.crt
+    xpack.security.transport.ssl.certificate_authorities:
+      - /usr/share/elasticsearch/config/tls/elastic.crt
 
-    # Индекс жизненного цикла — включить ILM
-    # xpack.ilm.enabled: true
+extraVolumes:
+  - name: tls-certs
+    secret:
+      secretName: elasticsearch-tls
+      defaultMode: 0440
 
-    # Ограничить Java heap (50% от limits.memory)
-    # Задаётся через переменную окружения ниже
+extraVolumeMounts:
+  - name: tls-certs
+    mountPath: /usr/share/elasticsearch/config/tls
+    readOnly: true
 
-esJavaOpts: "-Xmx1g -Xms1g"   # Java heap = 1 GB (50% от limit 2 GB)
-
-# Persistent Volume
 volumeClaimTemplate:
   storageClassName: "local-path"
   accessModes: ["ReadWriteOnce"]
@@ -68,16 +73,8 @@ volumeClaimTemplate:
     requests:
       storage: "10Gi"
 
-# Service — ClusterIP (Fluentd подключается внутри кластера)
 service:
   type: ClusterIP
   port: 9200
 
-# Проверка здоровья
-readinessProbe:
-  initialDelaySeconds: 30   # Elasticsearch долго стартует
-  periodSeconds: 15
-  timeoutSeconds: 10
-
-# Отключить pod disruption budget (для single-node)
 maxUnavailable: 1

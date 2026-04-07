@@ -1,43 +1,76 @@
 # =============================================================
-# k8s/logging/fluentd-values.yaml
-# Конфигурация Fluentd — агент сбора логов
+# k8s/logging/fluentd-values.yaml — v11 (правильный CA)
 #
-# Fluentd устанавливается как DaemonSet — по одному поду
-# на каждую ноду кластера. Он читает логи из файлов
-# /var/log/containers/*.log и отправляет в Elasticsearch.
+# ИСТОРИЯ ПОИСКА ПРОБЛЕМЫ:
+#   v8-v10: пытались использовать elastic.crt / elastic-ca.crt —
+#           сертификаты из нашего скрипта prepare-efk-secrets.sh.
+#           Не работало потому что ES их НЕ использует.
 #
-# PIPELINE ОБРАБОТКИ ЛОГОВ:
-#   Source (файл)
-#     → Filter (парсинг, обогащение метаданными K8s)
-#     → Match (маршрутизация в Elasticsearch)
+# НАСТОЯЩАЯ ПРИЧИНА (найдена через openssl s_client -showcerts):
+#   Elastic Helm chart при установке автоматически создаёт secret
+#   "elasticsearch-master-certs" со своими сертификатами и монтирует
+#   их в /usr/share/elasticsearch/config/certs/.
+#   ES реально использует:
+#     /config/certs/tls.crt  — leaf cert, CN = elasticsearch-master
+#     /config/certs/ca.crt   — CA cert,   CN = elasticsearch-ca
+#   Наш elastic.crt из /config/tls/ игнорируется полностью.
 #
-# РАЗДЕЛЕНИЕ ЛОГОВ (требование ТЗ п. 4.7.5):
-#   Логи приложения (namespace staging/prod) → индекс app-logs-YYYY.MM.DD
-#   Системные логи (namespace kube-system)   → индекс system-logs-YYYY.MM.DD
+# РЕШЕНИЕ v11:
+#   Взяли ca.crt из secret "elasticsearch-master-certs" (CN = elasticsearch-ca)
+#   и добавили в secret "elasticsearch-tls" как "es-master-ca.crt".
+#   Теперь ca_file указывает на него — Excon верифицирует именно тот CA
+#   которым подписан сертификат что реально отдаёт ES.
 # =============================================================
 
-# Версия образа Fluentd
 image:
   repository: fluent/fluentd-kubernetes-daemonset
   tag: "v1.16.2-debian-elasticsearch8-1.0"
 
-# DaemonSet нужен доступ к файлам логов на ноде
+initContainers:
+  - name: install-ca
+    image: fluent/fluentd-kubernetes-daemonset:v1.16.2-debian-elasticsearch8-1.0
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "=== Building CA bundle ==="
+        if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+          cp /etc/ssl/certs/ca-certificates.crt /shared-certs/cert.pem
+          echo "Copied system CA bundle"
+        else
+          touch /shared-certs/cert.pem
+          echo "No system CA bundle, starting empty"
+        fi
+        # Добавляем CA из elasticsearch-master-certs (CN = elasticsearch-ca)
+        # Именно этим CA подписан сертификат который ES реально отдаёт
+        cat /tmp/tls/es-master-ca.crt >> /shared-certs/cert.pem
+        echo "ES master CA appended (CN = elasticsearch-ca)"
+        echo "Total certs in bundle: $(grep -c 'BEGIN CERTIFICATE' /shared-certs/cert.pem)"
+        echo "=== Done ==="
+    volumeMounts:
+      - name: elasticsearch-tls
+        mountPath: /tmp/tls
+        readOnly: true
+      - name: shared-certs
+        mountPath: /shared-certs
+
 volumes:
-  - name: varlog
-    hostPath:
-      path: /var/log
-  - name: varlibdockercontainers
-    hostPath:
-      path: /var/lib/docker/containers
+  - name: elasticsearch-tls
+    secret:
+      secretName: elasticsearch-tls
+      defaultMode: 0400
+  - name: shared-certs
+    emptyDir: {}
 
 volumeMounts:
-  - name: varlog
-    mountPath: /var/log
-  - name: varlibdockercontainers
-    mountPath: /var/lib/docker/containers
+  - name: elasticsearch-tls
+    mountPath: /fluentd/tls
+    readOnly: true
+  - name: shared-certs
+    mountPath: /usr/lib/ssl/cert.pem
+    subPath: cert.pem
     readOnly: true
 
-# Tolerations: запускать на ALL нодах, включая control-plane
 tolerations:
   - key: node-role.kubernetes.io/control-plane
     operator: Exists
@@ -54,21 +87,53 @@ resources:
     cpu: "500m"
     memory: "512Mi"
 
-# ── Конфигурация Fluentd ──────────────────────────────────────
+env:
+  - name: ELASTICSEARCH_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: fluentd-credentials
+        key: username
+  - name: ELASTICSEARCH_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: fluentd-credentials
+        key: password
+  - name: SSL_CERT_FILE
+    value: /usr/lib/ssl/cert.pem
+
 fileConfigs:
-  # 01_sources.conf — откуда читать логи
   01_sources.conf: |
-    # Читать логи из /var/log/containers/*.log
-    # Kubernetes ротирует эти файлы
+    # Prometheus metrics endpoint — требуется для liveness/readiness probe
+    <source>
+      @type prometheus
+      @id input_prometheus
+      bind 0.0.0.0
+      port 24231
+      metrics_path /metrics
+    </source>
+
+    <source>
+      @type prometheus_monitor
+      @id input_prometheus_monitor
+    </source>
+
     <source>
       @type tail
       @id input_tail
       path /var/log/containers/*.log
+      exclude_path ["/var/log/containers/fluentd*"]
       pos_file /var/log/fluentd-containers.log.pos
       tag kubernetes.*
-      read_from_head true
+      read_from_head false
       <parse>
         @type multi_format
+        # Containerd/CRI формат: 2026-04-06T14:50:12.715738216+03:00 stderr F message
+        <pattern>
+          format regexp
+          expression /^(?<time>.+) (?<stream>stdout|stderr) (?<flags>[^ ]*) (?<log>.*)$/
+          time_format '%Y-%m-%dT%H:%M:%S.%N%z'
+        </pattern>
+        # Docker JSON формат
         <pattern>
           format json
           time_key time
@@ -76,29 +141,19 @@ fileConfigs:
           time_format "%Y-%m-%dT%H:%M:%S.%NZ"
           keep_time_key false
         </pattern>
-        <pattern>
-          format regexp
-          expression /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
-          time_format '%Y-%m-%dT%H:%M:%S.%NZ'
-        </pattern>
       </parse>
     </source>
 
-  # 02_filters.conf — обогащение метаданными K8s
   02_filters.conf: |
-    # Добавить к каждой записи метаданные пода:
-    # namespace, pod_name, container_name, labels
     <filter kubernetes.**>
       @type kubernetes_metadata
       @id filter_kube_metadata
       kubernetes_url "https://#{ENV['KUBERNETES_SERVICE_HOST']}:#{ENV['KUBERNETES_SERVICE_PORT']}/api"
       verify_ssl false
-      # Кэш metadata (уменьшает нагрузку на API server)
       cache_size 1000
       cache_ttl 3600
     </filter>
 
-    # Парсить JSON логи из Node.js (Winston logger выводит JSON)
     <filter kubernetes.**>
       @type parser
       @id filter_parse_app_log
@@ -116,23 +171,23 @@ fileConfigs:
       </parse>
     </filter>
 
-    # Фильтр: добавить поле environment на основе namespace
     <filter kubernetes.**>
       @type record_transformer
       @id filter_add_environment
+      enable_ruby true
       <record>
-        # Определить окружение по namespace
         environment ${record.dig("kubernetes", "namespace_name") == "prod" ? "production" : record.dig("kubernetes", "namespace_name") == "staging" ? "staging" : "system"}
-        # Добавить hostname ноды
         node_name "#{ENV['NODE_NAME']}"
-        # Временная метка в читаемом формате
         log_time ${time.strftime('%Y-%m-%d %H:%M:%S')}
       </record>
     </filter>
 
-  # 03_dispatch.conf — маршрутизация по типу логов
   03_dispatch.conf: |
-    # Системные логи (kube-system, argocd, monitoring)
+    <match kubernetes.var.log.containers.fluentd**>
+      @type null
+      @id ignore_fluentd_logs
+    </match>
+
     <match kubernetes.var.log.containers.**_kube-system_**.log>
       @type relabel
       @label @SYSTEM_LOGS
@@ -148,7 +203,6 @@ fileConfigs:
       @label @SYSTEM_LOGS
     </match>
 
-    # Логи приложения (staging, prod)
     <match kubernetes.var.log.containers.**_staging_**.log>
       @type relabel
       @label @APP_LOGS
@@ -159,50 +213,92 @@ fileConfigs:
       @label @APP_LOGS
     </match>
 
-    # Все остальные → системные
     <match kubernetes.**>
       @type relabel
       @label @SYSTEM_LOGS
     </match>
 
-  # 04_outputs.conf — отправка в Elasticsearch
   04_outputs.conf: |
-    # ── Логи приложения → app-logs-YYYY.MM.DD ────────────────
     <label @APP_LOGS>
       <match **>
         @type elasticsearch
         @id output_es_app
         host elasticsearch-master
         port 9200
-        scheme http
-        # Динамическое имя индекса с датой (для ротации)
+        scheme https
+        user "#{ENV['ELASTICSEARCH_USERNAME']}"
+        password "#{ENV['ELASTICSEARCH_PASSWORD']}"
+        ca_file /fluentd/tls/es-master-ca.crt
+        ssl_verify true
+        verify_es_version_at_startup false
+        default_elasticsearch_version 8
+        suppress_type_name true
         index_name app-logs-%Y.%m.%d
-        <buffer time>
+        reconnect_on_error true
+        reload_on_failure true
+        reload_connections false
+        <buffer tag,time>
           @type file
           path /var/log/fluentd-buffers/app
+          timekey 1h
+          timekey_wait 10s
           flush_mode interval
           flush_interval 10s
-          # Если Elasticsearch недоступен — буферизовать на диске
+          retry_type exponential_backoff
+          retry_max_interval 30s
+          retry_forever true
           overflow_action block
         </buffer>
       </match>
     </label>
 
-    # ── Системные логи → system-logs-YYYY.MM.DD ──────────────
     <label @SYSTEM_LOGS>
       <match **>
         @type elasticsearch
         @id output_es_system
         host elasticsearch-master
         port 9200
-        scheme http
+        scheme https
+        user "#{ENV['ELASTICSEARCH_USERNAME']}"
+        password "#{ENV['ELASTICSEARCH_PASSWORD']}"
+        ca_file /fluentd/tls/es-master-ca.crt
+        ssl_verify true
+        verify_es_version_at_startup false
+        default_elasticsearch_version 8
+        suppress_type_name true
         index_name system-logs-%Y.%m.%d
-        <buffer time>
+        reconnect_on_error true
+        reload_on_failure true
+        reload_connections false
+        <buffer tag,time>
           @type file
           path /var/log/fluentd-buffers/system
+          timekey 1h
+          timekey_wait 10s
           flush_mode interval
           flush_interval 30s
+          retry_type exponential_backoff
+          retry_max_interval 60s
+          retry_forever true
           overflow_action block
         </buffer>
       </match>
     </label>
+
+livenessProbe:
+  httpGet:
+    path: /metrics
+    port: metrics
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
+
+readinessProbe:
+  httpGet:
+    path: /metrics
+    port: metrics
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 6
